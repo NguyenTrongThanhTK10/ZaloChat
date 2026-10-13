@@ -1,0 +1,52 @@
+{
+  "openapi": "3.1.0",
+  "info": {"title": "Chat API local MVP", "version": "1.0.0", "description": "One-to-one text chat. SignalR endpoint: /hubs/chat."},
+  "servers": [{"url": "/"}],
+  "security": [{"bearerAuth": []}],
+  "paths": {
+    "/health": {"get": {"security": [], "responses": {"200": {"description": "Healthy"}}}},
+    "/api/auth/register": {"post": {"security": [], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RegisterRequest"}}}}, "responses": {"201": {"$ref": "#/components/responses/Auth"}, "400": {"$ref": "#/components/responses/Error"}, "409": {"$ref": "#/components/responses/Error"}}}},
+    "/api/auth/login": {"post": {"security": [], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}}, "responses": {"200": {"$ref": "#/components/responses/Auth"}, "401": {"$ref": "#/components/responses/Error"}}}},
+    "/api/auth/refresh": {"post": {"security": [], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/RefreshRequest"}}}}, "responses": {"200": {"$ref": "#/components/responses/Auth"}, "401": {"$ref": "#/components/responses/Error"}}}},
+    "/api/auth/me": {"get": {"responses": {"200": {"$ref": "#/components/responses/User"}, "401": {"$ref": "#/components/responses/Error"}}}},
+    "/api/users": {"get": {"parameters": [{"name": "query", "in": "query", "schema": {"type": "string"}}], "responses": {"200": {"description": "Matching users excluding caller, at most 50", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/User"}}}}}}}},
+    "/api/conversations": {
+      "get": {"responses": {"200": {"description": "Conversations newest first", "content": {"application/json": {"schema": {"type": "array", "items": {"$ref": "#/components/schemas/Conversation"}}}}}}},
+      "post": {"requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CreateConversationRequest"}}}}, "responses": {"201": {"$ref": "#/components/responses/Conversation"}, "200": {"$ref": "#/components/responses/Conversation"}, "404": {"$ref": "#/components/responses/Error"}}}
+    },
+    "/api/conversations/{id}/messages": {
+      "parameters": [{"$ref": "#/components/parameters/ConversationId"}],
+      "get": {"parameters": [{"name": "beforeSequence", "in": "query", "description": "Exclusive older-than cursor", "schema": {"type": "integer", "format": "int64", "minimum": 1}}, {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 30}}], "responses": {"200": {"$ref": "#/components/responses/MessagePage"}, "404": {"$ref": "#/components/responses/Error"}}},
+      "post": {"requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SendMessageRequest"}}}}, "responses": {"201": {"$ref": "#/components/responses/Message"}, "200": {"$ref": "#/components/responses/Message"}, "409": {"$ref": "#/components/responses/Error"}}}
+    },
+    "/api/conversations/{id}/read": {"parameters": [{"$ref": "#/components/parameters/ConversationId"}], "post": {"requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MarkReadRequest"}}}}, "responses": {"200": {"$ref": "#/components/responses/Read"}, "404": {"$ref": "#/components/responses/Error"}}}}
+  },
+  "components": {
+    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
+    "parameters": {"ConversationId": {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "format": "uuid"}}},
+    "responses": {
+      "Auth": {"description": "Access token and rotated refresh token", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Auth"}}}},
+      "User": {"description": "User", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/User"}}}},
+      "Conversation": {"description": "Conversation", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Conversation"}}}},
+      "Message": {"description": "Message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Message"}}}},
+      "MessagePage": {"description": "Newest-first page", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MessagePage"}}}},
+      "Read": {"description": "Read cursor", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Read"}}}},
+      "Error": {"description": "API error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ApiError"}}}}
+    },
+    "schemas": {
+      "User": {"type": "object", "required": ["id", "displayName", "email"], "properties": {"id": {"type": "string", "format": "uuid"}, "displayName": {"type": "string"}, "email": {"type": "string", "format": "email"}}},
+      "Message": {"type": "object", "required": ["id", "clientMessageId", "conversationId", "senderId", "text", "sequence", "createdAt"], "properties": {"id": {"type": "string", "format": "uuid"}, "clientMessageId": {"type": "string", "format": "uuid"}, "conversationId": {"type": "string", "format": "uuid"}, "senderId": {"type": "string", "format": "uuid"}, "text": {"type": "string"}, "sequence": {"type": "integer", "format": "int64"}, "createdAt": {"type": "string", "format": "date-time"}}},
+      "Conversation": {"type": "object", "required": ["id", "peer", "lastMessage", "unreadCount", "lastReadSequence", "peerLastReadSequence"], "properties": {"id": {"type": "string", "format": "uuid"}, "peer": {"$ref": "#/components/schemas/User"}, "lastMessage": {"oneOf": [{"$ref": "#/components/schemas/Message"}, {"type": "null"}]}, "unreadCount": {"type": "integer", "format": "int64"}, "lastReadSequence": {"type": "integer", "format": "int64", "description": "Current user's read cursor"}, "peerLastReadSequence": {"type": "integer", "format": "int64", "description": "Other member's read cursor"}}},
+      "Auth": {"type": "object", "required": ["user", "accessToken", "refreshToken"], "properties": {"user": {"$ref": "#/components/schemas/User"}, "accessToken": {"type": "string"}, "refreshToken": {"type": "string"}}},
+      "MessagePage": {"type": "object", "required": ["items", "nextCursor"], "properties": {"items": {"type": "array", "items": {"$ref": "#/components/schemas/Message"}}, "nextCursor": {"type": ["integer", "null"], "format": "int64"}}},
+      "Read": {"type": "object", "required": ["lastReadSequence"], "properties": {"lastReadSequence": {"type": "integer", "format": "int64"}}},
+      "ApiError": {"type": "object", "required": ["code", "message"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}}},
+      "RegisterRequest": {"type": "object", "required": ["displayName", "email", "password"], "properties": {"displayName": {"type": "string", "maxLength": 80}, "email": {"type": "string", "format": "email"}, "password": {"type": "string", "minLength": 8, "maxLength": 128}}},
+      "LoginRequest": {"type": "object", "required": ["email", "password"], "properties": {"email": {"type": "string", "format": "email"}, "password": {"type": "string"}}},
+      "RefreshRequest": {"type": "object", "required": ["refreshToken"], "properties": {"refreshToken": {"type": "string"}}},
+      "CreateConversationRequest": {"type": "object", "required": ["peerUserId"], "properties": {"peerUserId": {"type": "string", "format": "uuid"}}},
+      "SendMessageRequest": {"type": "object", "required": ["clientMessageId", "text"], "properties": {"clientMessageId": {"type": "string", "format": "uuid"}, "text": {"type": "string", "minLength": 1, "maxLength": 4000}}},
+      "MarkReadRequest": {"type": "object", "required": ["throughSequence"], "properties": {"throughSequence": {"type": "integer", "format": "int64", "minimum": 0}}}
+    }
+  }
+}
