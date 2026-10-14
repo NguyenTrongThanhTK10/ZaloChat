@@ -64,6 +64,21 @@ class RemoteAuthRepository implements AuthRepository {
   @override
   Future<void> logout() => _tokenStore.clear();
 
+  @override
+  Future<ChatUser> updateProfile(String displayName, String email) async {
+    try {
+      final response = await _dio.put(
+        '/api/auth/me',
+        data: {'displayName': displayName, 'email': email},
+      );
+      final user = _userFromJson(response.data);
+      await _saveUser(user);
+      return user;
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
   Future<void> _saveUser(ChatUser user) => _tokenStore.saveUser({
     'id': user.id,
     'displayName': user.displayName,

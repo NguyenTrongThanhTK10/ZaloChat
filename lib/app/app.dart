@@ -9,11 +9,15 @@ import '../features/chat/presentation/pages/chat_page.dart';
 import '../features/chat/presentation/providers/message_providers.dart';
 import '../features/conversations/presentation/pages/conversations_page.dart';
 import '../features/contacts/presentation/pages/people_page.dart';
+import '../features/contacts/presentation/pages/person_detail_page.dart';
 import '../features/profile/presentation/pages/profile_page.dart';
+import '../features/profile/presentation/pages/edit_profile_page.dart';
 import 'theme_mode_provider.dart';
 
 final appRouterProvider = Provider<GoRouter>((ref) {
-  final signedIn = ref.watch(currentUserProvider) != null;
+  final signedIn = ref.watch(
+    currentUserProvider.select((user) => user != null),
+  );
   final router = GoRouter(
     initialLocation: signedIn ? '/' : '/login',
     redirect: (_, state) {
@@ -45,9 +49,18 @@ final appRouterProvider = Provider<GoRouter>((ref) {
             const AppShell(selectedIndex: 2, child: ProfilePage()),
       ),
       GoRoute(
+        path: '/profile/edit',
+        builder: (_, _) => const EditProfilePage(),
+      ),
+      GoRoute(
         path: '/chat/:id',
         builder: (_, state) =>
             ChatPage(conversationId: state.pathParameters['id']!),
+      ),
+      GoRoute(
+        path: '/people/:id',
+        builder: (_, state) =>
+            PersonDetailPage(userId: state.pathParameters['id']!),
       ),
     ],
   );

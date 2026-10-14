@@ -36,6 +36,10 @@ final userSearchProvider = FutureProvider.family<List<ChatUser>, String>(
   (ref, query) => ref.watch(conversationRepositoryProvider).searchUsers(query),
 );
 
+final userDetailProvider = FutureProvider.family<ChatUser, String>(
+  (ref, id) => ref.watch(conversationRepositoryProvider).getUser(id),
+);
+
 final unreadCountProvider = Provider<int>((ref) {
   final items = ref.watch(conversationListProvider).asData?.value ?? const [];
   return items.fold<int>(0, (count, item) => count + item.unreadCount);

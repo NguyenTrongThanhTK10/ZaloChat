@@ -6,17 +6,23 @@ using Microsoft.AspNetCore.SignalR;
 
 namespace Chat.Api.Endpoints;
 
-public static class ChatEndpoints
+public static partial class ChatEndpoints
 {
     public static void MapChatEndpoints(this WebApplication app)
     {
         var api = app.MapGroup("/api").RequireAuthorization();
         api.MapGet("/users", GetUsersAsync);
+        api.MapGet("/users/{id:guid}", GetUserAsync);
         api.MapGet("/conversations", GetConversationsAsync);
         api.MapPost("/conversations", CreateConversationAsync);
         api.MapGet("/conversations/{id:guid}/messages", GetMessagesAsync);
         api.MapPost("/conversations/{id:guid}/messages", SendMessageAsync)
             .RequireRateLimiting("send");
+        api.MapPost("/conversations/{id:guid}/voice", SendVoiceAsync)
+            .RequireRateLimiting("send");
+        api.MapGet("/messages/{id:guid}/audio", GetVoiceAsync);
+        api.MapPut("/messages/{id:guid}/heart", AddHeartAsync);
+        api.MapDelete("/messages/{id:guid}/heart", RemoveHeartAsync);
         api.MapPost("/conversations/{id:guid}/read", MarkReadAsync);
     }
 
@@ -35,6 +41,18 @@ public static class ChatEndpoints
             .Select(UserDto.From)
             .ToList(), cancellationToken);
         return Results.Ok(users);
+    }
+
+    private static async Task<IResult> GetUserAsync(
+        Guid id, ClaimsPrincipal principal, ChatStore store, CancellationToken cancellationToken)
+    {
+        var currentUserId = principal.CurrentUserId();
+        var user = await store.ReadAsync(state => state.Users
+            .Where(item => item.Id == id && item.Id != currentUserId)
+            .Select(UserDto.From)
+            .FirstOrDefault(), cancellationToken);
+        if (user is null) throw ApiException.NotFound("User not found.");
+        return Results.Ok(user);
     }
 
     private static async Task<IResult> GetConversationsAsync(
@@ -134,7 +152,8 @@ public static class ChatEndpoints
                 message.ClientMessageId == request.ClientMessageId);
             if (existing is not null)
             {
-                if (existing.Text != request.Text)
+                if (existing.Kind != "text" || existing.Text != request.Text ||
+                    existing.ReplyTo?.Id != request.ReplyToMessageId)
                     throw ApiException.Conflict("clientMessageId was already used with different text.");
                 return new SendMutation(MessageDto.From(existing), false,
                     conversation.PeerId(userId),
@@ -146,6 +165,7 @@ public static class ChatEndpoints
             {
                 Id = Guid.NewGuid(), ClientMessageId = request.ClientMessageId,
                 ConversationId = id, SenderId = userId, Text = request.Text,
+                ReplyTo = CreateReply(state, id, request.ReplyToMessageId),
                 Sequence = conversation.NextSequence++, CreatedAt = DateTimeOffset.UtcNow
             };
             state.Messages.Add(message);
@@ -169,6 +189,17 @@ public static class ChatEndpoints
                 result.ForUser, result.ForPeer);
         }
         return Results.Json(result.Message, statusCode: result.Created ? 201 : 200);
+    }
+
+    private static MessageReplyDto? CreateReply(ChatState state, Guid conversationId,
+        Guid? messageId)
+    {
+        if (messageId is null) return null;
+        var target = state.Messages.FirstOrDefault(message =>
+            message.Id == messageId && message.ConversationId == conversationId);
+        if (target is null)
+            throw ApiException.Validation("The replied message must belong to this conversation.");
+        return new MessageReplyDto(target.Id, target.SenderId, target.Text, target.Kind);
     }
 
     private static async Task<IResult> MarkReadAsync(
@@ -208,6 +239,53 @@ public static class ChatEndpoints
         return Results.Ok(new ReadDto(result.Sequence));
     }
 
+    private static Task<IResult> AddHeartAsync(
+        Guid id, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
+        SetHeartAsync(id, true, principal, store, hub, logger, cancellationToken);
+
+    private static Task<IResult> RemoveHeartAsync(
+        Guid id, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
+        SetHeartAsync(id, false, principal, store, hub, logger, cancellationToken);
+
+    private static async Task<IResult> SetHeartAsync(
+        Guid id, bool hearted, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken)
+    {
+        var userId = principal.CurrentUserId();
+        var result = await store.MutateAsync(state =>
+        {
+            var message = state.Messages.FirstOrDefault(item => item.Id == id);
+            if (message is null)
+                throw ApiException.NotFound("Message not found.");
+            var conversation = ChatQueries.GetConversation(state, message.ConversationId, userId);
+            var changed = hearted
+                ? !message.HeartedBy.Contains(userId)
+                : message.HeartedBy.Contains(userId);
+            if (changed)
+            {
+                if (hearted) message.HeartedBy.Add(userId);
+                else message.HeartedBy.Remove(userId);
+            }
+            return new HeartMutation(MessageDto.From(message), changed,
+                conversation.PeerId(userId));
+        }, cancellationToken);
+
+        if (result.Changed)
+        {
+            await PublishAsync(async () =>
+            {
+                await Task.WhenAll(
+                    hub.Clients.Group(ChatHub.UserGroup(userId))
+                        .SendAsync("MessageUpdated", result.Message),
+                    hub.Clients.Group(ChatHub.UserGroup(result.PeerId))
+                        .SendAsync("MessageUpdated", result.Message));
+            }, logger);
+        }
+        return Results.Ok(result.Message);
+    }
+
     private static async Task PublishConversationsAsync(
         IHubContext<ChatHub> hub, ILogger logger, Guid userId, Guid peerId,
         ConversationDto forUser, ConversationDto forPeer)
@@ -240,4 +318,5 @@ public static class ChatEndpoints
     private sealed record ReadMutation(
         long Sequence, bool Advanced, Guid PeerId,
         ConversationDto ForUser, ConversationDto ForPeer);
+    private sealed record HeartMutation(MessageDto Message, bool Changed, Guid PeerId);
 }

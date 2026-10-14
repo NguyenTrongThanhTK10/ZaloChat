@@ -1,20 +1,14 @@
 import 'dart:async';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../config/app_config.dart';
 import '../security/token_store.dart';
+import 'api_log_interceptor.dart';
 
 class ApiClient {
-  ApiClient(this._tokenStore)
-    : dio = Dio(
-        BaseOptions(
-          baseUrl: AppConfig.apiBaseUrl,
-          connectTimeout: const Duration(seconds: 10),
-          receiveTimeout: const Duration(seconds: 15),
-          headers: {'Accept': 'application/json'},
-        ),
-      ) {
+  ApiClient(this._tokenStore) : dio = _createDio() {
     dio.interceptors.add(
       InterceptorsWrapper(
         onRequest: (options, handler) async {
@@ -75,8 +69,10 @@ class ApiClient {
       return null;
     }
     try {
-      final response = await Dio(BaseOptions(baseUrl: AppConfig.apiBaseUrl))
-          .post('/api/auth/refresh', data: {'refreshToken': refreshToken});
+      final response = await _createDio().post(
+        '/api/auth/refresh',
+        data: {'refreshToken': refreshToken},
+      );
       final body = Map<String, dynamic>.from(response.data as Map);
       final access = body['accessToken'] as String;
       final refresh = body['refreshToken'] as String;
@@ -94,5 +90,18 @@ class ApiClient {
   Future<void> _expireSession() async {
     await _tokenStore.clear();
     if (!_sessionExpired.isClosed) _sessionExpired.add(null);
+  }
+
+  static Dio _createDio() {
+    final client = Dio(
+      BaseOptions(
+        baseUrl: AppConfig.apiBaseUrl,
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 15),
+        headers: {'Accept': 'application/json'},
+      ),
+    );
+    if (kDebugMode) client.interceptors.add(ApiLogInterceptor());
+    return client;
   }
 }

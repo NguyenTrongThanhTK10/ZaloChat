@@ -86,4 +86,12 @@ class AuthNotifier extends AsyncNotifier<AuthSession?> {
     }
     state = const AsyncData(null);
   }
+
+  Future<void> updateProfile(String displayName, String email) async {
+    final user = await ref
+        .read(authRepositoryProvider)
+        .updateProfile(displayName, email);
+    if (!ref.mounted || state.asData?.value?.user.id != user.id) return;
+    state = AsyncData(AuthSession(user));
+  }
 }

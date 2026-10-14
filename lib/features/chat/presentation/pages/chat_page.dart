@@ -1,15 +1,25 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:uuid/uuid.dart';
 
-import '../../../../core/theme/app_theme.dart';
+import '../../../../core/media/voice_playback.dart';
+import '../../../../app/chat_preferences_provider.dart';
+import '../../../../core/media/voice_recorder.dart';
+import '../../../../core/media/speech_input.dart';
+import '../../../../core/media/speech_input_provider.dart';
 import '../../../../core/realtime/realtime_providers.dart';
 import '../../../../core/realtime/realtime_service.dart';
+import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/chat_avatar.dart';
 import '../../../../core/widgets/content_state.dart';
 import '../../../auth/presentation/providers/auth_providers.dart';
+import '../../../conversations/domain/entities/conversation.dart';
 import '../../../conversations/presentation/providers/conversation_providers.dart';
 import '../../domain/entities/chat_message.dart';
 import '../providers/message_providers.dart';
@@ -26,16 +36,40 @@ class ChatPage extends ConsumerStatefulWidget {
 class _ChatPageState extends ConsumerState<ChatPage>
     with WidgetsBindingObserver {
   final _composerController = TextEditingController();
+  final _composerFocus = FocusNode();
+  MessageReply? _replyTo;
   final _scrollController = ScrollController();
+  final _heartBusy = <String>{};
   bool _sending = false;
+  bool _showEmojiPicker = false;
+  bool _showVoicePanel = false;
+  bool _voiceAsText = false;
   bool _loadingOlder = false;
   bool _showLatestButton = false;
   int _lastMarkedSequence = 0;
   bool _isResumed = true;
+  final VoiceRecorder _voiceRecorder = VoiceRecorder();
+  VoicePlayback? _voicePlayback;
+  VoiceRecording? _recordedVoice;
+  String? _voiceClientMessageId;
+  bool _recording = false;
+  bool _voiceBusy = false;
+  Duration _recordingElapsed = Duration.zero;
+  Timer? _recordingTimer;
+  late final SpeechInput _speechInput;
+  bool _ownsSpeechInput = false;
+  bool _startingSpeech = false;
+  int _speechUiSession = 0;
+  TextEditingValue? _lastSpeechValue;
+  String? _lastSpeechError;
+
+  bool get _speechActive => _startingSpeech || _speechInput.active;
 
   @override
   void initState() {
     super.initState();
+    _speechInput = ref.read(speechInputProvider);
+    _speechInput.addListener(_onSpeechChanged);
     WidgetsBinding.instance.addObserver(this);
     _scrollController.addListener(_onScroll);
   }
@@ -44,6 +78,14 @@ class _ChatPageState extends ConsumerState<ChatPage>
   void didUpdateWidget(covariant ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.conversationId != widget.conversationId) {
+      unawaited(_cancelSpeech());
+      _lastSpeechError = null;
+      _replyTo = null;
+      _showVoicePanel = false;
+      _voiceAsText = false;
+      unawaited(_discardVoice());
+      _voicePlayback?.dispose();
+      _voicePlayback = null;
       _lastMarkedSequence = 0;
       _showLatestButton = false;
       if (_scrollController.hasClients) {
@@ -54,11 +96,33 @@ class _ChatPageState extends ConsumerState<ChatPage>
 
   @override
   void dispose() {
+    _speechUiSession++;
+    _speechInput.removeListener(_onSpeechChanged);
+    if (_ownsSpeechInput || _startingSpeech) {
+      unawaited(_speechInput.cancel());
+    }
+    _ownsSpeechInput = false;
+    _recordingTimer?.cancel();
+    unawaited(_disposeVoiceRecorder());
+    if (_recordedVoice case final voice?) {
+      unawaited(File(voice.path).delete().catchError((_) => File(voice.path)));
+    }
+    _voicePlayback?.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _composerController.dispose();
+    _composerFocus.dispose();
     super.dispose();
+  }
+
+  Future<void> _disposeVoiceRecorder() async {
+    try {
+      if (_recording) await _voiceRecorder.cancel();
+      await _voiceRecorder.dispose();
+    } catch (_) {
+      // The route may close while the native recorder is already stopping.
+    }
   }
 
   void _onScroll() {
@@ -76,6 +140,16 @@ class _ChatPageState extends ConsumerState<ChatPage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _isResumed = state == AppLifecycleState.resumed;
+    if (!_isResumed && _recording && !_voiceBusy) {
+      unawaited(_finishVoice());
+    }
+    if (_ownsSpeechInput &&
+        _speechInput.state == SpeechInputState.listening &&
+        !_isResumed) {
+      unawaited(_speechInput.stop());
+    } else if (state == AppLifecycleState.paused && _startingSpeech) {
+      unawaited(_cancelSpeech());
+    }
     if (_isResumed) {
       final messages = ref
           .read(messagesProvider(widget.conversationId))
@@ -86,15 +160,266 @@ class _ChatPageState extends ConsumerState<ChatPage>
   }
 
   Future<void> _sendMessage() async {
-    final text = _composerController.text.trim();
-    if (text.isEmpty || _sending) return;
+    await _sendText(_composerController.text, clearComposer: true);
+  }
+
+  void _openVoicePanel() {
+    if (_sending || _voiceBusy || _speechActive) return;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _showEmojiPicker = false;
+      _showVoicePanel = true;
+    });
+  }
+
+  Future<void> _closeVoicePanel() async {
+    if (_voiceBusy || _sending) return;
+    if (_speechActive) await _cancelSpeech();
+    if (_recording || _recordedVoice != null) await _discardVoice();
+    if (mounted) setState(() => _showVoicePanel = false);
+  }
+
+  void _selectVoiceMode(bool asText) {
+    if (_speechActive || _recording || _recordedVoice != null || _voiceBusy) {
+      return;
+    }
+    setState(() {
+      _voiceAsText = asText;
+      _lastSpeechError = null;
+    });
+  }
+
+  void _onSpeechChanged() {
+    if (!mounted) return;
+    if (_ownsSpeechInput) {
+      if (_speechInput.value != _lastSpeechValue) {
+        _lastSpeechValue = _speechInput.value;
+        _composerController.value = _speechInput.value;
+      }
+      final error = _speechInput.error;
+      if (error != null && error != _lastSpeechError) {
+        _lastSpeechError = error;
+      }
+      if (!_speechInput.active && !_startingSpeech) _ownsSpeechInput = false;
+    }
+    setState(() {});
+  }
+
+  Future<void> _startSpeech() async {
+    if (_speechActive ||
+        _sending ||
+        _voiceBusy ||
+        _recording ||
+        _recordedVoice != null) {
+      return;
+    }
+    final session = ++_speechUiSession;
+    final draft = _composerController.value;
+    _ownsSpeechInput = true;
+    _lastSpeechValue = draft;
+    _lastSpeechError = null;
+    FocusManager.instance.primaryFocus?.unfocus();
+    setState(() {
+      _startingSpeech = true;
+      _showEmojiPicker = false;
+    });
+    try {
+      await _voicePlayback?.pause();
+      if (!mounted || session != _speechUiSession || !_isResumed) return;
+      await _speechInput.start(draft);
+    } catch (_) {
+      if (mounted && session == _speechUiSession) {
+        setState(
+          () => _lastSpeechError =
+              'Không mở được nhập tin bằng giọng nói. Vui lòng thử lại.',
+        );
+      }
+    } finally {
+      if (mounted && session == _speechUiSession) {
+        setState(() => _startingSpeech = false);
+        if (!_speechInput.active) _ownsSpeechInput = false;
+      }
+    }
+  }
+
+  Future<void> _cancelSpeech() async {
+    if (!_ownsSpeechInput && !_startingSpeech) return;
+    final session = ++_speechUiSession;
+    if (mounted) setState(() => _startingSpeech = false);
+    await _speechInput.cancel();
+    if (session == _speechUiSession) _ownsSpeechInput = false;
+  }
+
+  Future<void> _startVoice() async {
+    if (_voiceBusy || _recording || _speechActive) return;
+    final conversationId = widget.conversationId;
+    setState(() => _voiceBusy = true);
+    try {
+      await _voicePlayback?.pause();
+      if (!mounted || widget.conversationId != conversationId) return;
+      final allowed = await _voiceRecorder.start();
+      if (!mounted || widget.conversationId != conversationId) {
+        if (allowed) await _voiceRecorder.cancel();
+        return;
+      }
+      if (!allowed) {
+        _showVoiceError('Cần cho phép dùng micro để ghi âm.');
+        return;
+      }
+      setState(() {
+        _recording = true;
+        _recordingElapsed = Duration.zero;
+        _showEmojiPicker = false;
+      });
+      _recordingTimer = Timer.periodic(const Duration(milliseconds: 200), (_) {
+        if (!mounted || !_recording) return;
+        setState(() => _recordingElapsed = _voiceRecorder.elapsed);
+        if (_recordingElapsed >= const Duration(seconds: 120)) {
+          unawaited(_finishVoice());
+        }
+      });
+    } catch (_) {
+      if (mounted) _showVoiceError('Không bắt đầu ghi âm được.');
+    } finally {
+      if (mounted) setState(() => _voiceBusy = false);
+    }
+  }
+
+  Future<void> _finishVoice() async {
+    if (!_recording || _voiceBusy) return;
+    _recordingTimer?.cancel();
+    setState(() => _voiceBusy = true);
+    try {
+      final voice = await _voiceRecorder.stop();
+      if (!mounted) return;
+      if (voice == null || voice.durationMs < 1000) {
+        if (voice != null) {
+          await File(voice.path).delete();
+        }
+        _showVoiceError('Hãy ghi âm ít nhất 1 giây.');
+      } else {
+        setState(() {
+          _recordedVoice = voice;
+          _voiceClientMessageId = const Uuid().v4();
+        });
+      }
+    } catch (_) {
+      if (mounted) _showVoiceError('Không lưu được bản ghi âm.');
+    } finally {
+      if (mounted) {
+        setState(() {
+          _recording = false;
+          _voiceBusy = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _discardVoice() async {
+    _recordingTimer?.cancel();
+    final wasRecording = _recording;
+    final voice = _recordedVoice;
+    if (mounted) {
+      setState(() {
+        _recording = false;
+        _recordedVoice = null;
+        _voiceClientMessageId = null;
+      });
+    }
+    try {
+      if (wasRecording) await _voiceRecorder.cancel();
+      if (voice != null) {
+        final file = File(voice.path);
+        if (await file.exists()) await file.delete();
+      }
+    } catch (_) {
+      if (mounted) _showVoiceError('Không hủy được bản ghi âm.');
+    }
+  }
+
+  Future<void> _sendVoice() async {
+    final voice = _recordedVoice;
+    final clientMessageId = _voiceClientMessageId;
+    if (voice == null || clientMessageId == null || _voiceBusy) return;
+    setState(() => _voiceBusy = true);
+    try {
+      await ref
+          .read(messagesProvider(widget.conversationId).notifier)
+          .sendVoice(
+            voice.path,
+            voice.durationMs,
+            clientMessageId: clientMessageId,
+            replyTo: _replyTo,
+          );
+      if (!mounted) return;
+      setState(() {
+        _recordedVoice = null;
+        _voiceClientMessageId = null;
+        _replyTo = null;
+        _showVoicePanel = false;
+      });
+      final file = File(voice.path);
+      try {
+        if (await file.exists()) {
+          await file.delete();
+        }
+      } catch (_) {
+        // The message was sent; temporary file cleanup can be skipped.
+      }
+      if (_scrollController.hasClients) {
+        unawaited(
+          _scrollController.animateTo(
+            0,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+    } catch (_) {
+      if (mounted) {
+        _showVoiceError('Không gửi được tin nhắn thoại. Nhấn gửi để thử lại.');
+      }
+    } finally {
+      if (mounted) setState(() => _voiceBusy = false);
+    }
+  }
+
+  Future<void> _toggleVoice(ChatMessage message) async {
+    if (_speechActive || _recording || _voiceBusy) return;
+    try {
+      if (_voicePlayback == null) {
+        setState(
+          () => _voicePlayback = VoicePlayback(
+            ref.read(messageRepositoryProvider),
+          ),
+        );
+      }
+      final playback = _voicePlayback!;
+      await playback.toggle(message.id);
+    } catch (_) {
+      if (mounted) _showVoiceError('Không phát được tin nhắn thoại.');
+    }
+  }
+
+  void _showVoiceError(String message) =>
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+
+  Future<void> _sendText(String value, {bool clearComposer = false}) async {
+    final text = value.trim();
+    if (text.isEmpty || _sending || _speechActive) return;
+    final replyTo = _replyTo;
     setState(() => _sending = true);
     try {
       await ref
           .read(messagesProvider(widget.conversationId).notifier)
-          .send(text);
-      if (mounted && _composerController.text.trim() == text) {
+          .send(text, replyTo: replyTo);
+      if (mounted && identical(_replyTo, replyTo)) {
+        setState(() => _replyTo = null);
+      }
+      if (mounted && clearComposer && _composerController.text.trim() == text) {
         _composerController.clear();
+        setState(() => _showVoicePanel = false);
       }
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -113,6 +438,112 @@ class _ChatPageState extends ConsumerState<ChatPage>
       }
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  void _insertEmoji(String emoji) {
+    final value = _composerController.value;
+    final selection = value.selection;
+    final start = selection.isValid ? selection.start : value.text.length;
+    final end = selection.isValid ? selection.end : value.text.length;
+    final updated = value.text.replaceRange(start, end, emoji);
+    _composerController.value = TextEditingValue(
+      text: updated,
+      selection: TextSelection.collapsed(offset: start + emoji.length),
+    );
+  }
+
+  Future<void> _showMessageActions(ChatMessage message, String? userId) async {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    final conversationId = widget.conversationId;
+    final canReact =
+        userId != null &&
+        message.sequence > 0 &&
+        !_heartBusy.contains(message.id);
+    final canReply =
+        userId != null &&
+        message.sequence > 0 &&
+        !_sending &&
+        !_voiceBusy &&
+        !_recording &&
+        !_speechActive &&
+        _recordedVoice == null;
+    final hearted = message.heartedBy.contains(userId);
+    final action = await showModalBottomSheet<_MessageAction>(
+      context: context,
+      showDragHandle: true,
+      builder: (sheetContext) => SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Icon(
+                hearted
+                    ? Icons.favorite_rounded
+                    : Icons.favorite_border_rounded,
+                color: Theme.of(sheetContext).colorScheme.error,
+              ),
+              title: Text(hearted ? 'Bỏ tim' : 'Thả tim'),
+              enabled: canReact,
+              onTap: () => Navigator.pop(sheetContext, _MessageAction.heart),
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('Sao chép'),
+              enabled: message.kind == MessageKind.text,
+              onTap: () => Navigator.pop(sheetContext, _MessageAction.copy),
+            ),
+            ListTile(
+              leading: const Icon(Icons.reply_rounded),
+              title: const Text('Trả lời'),
+              enabled: canReply,
+              onTap: () => Navigator.pop(sheetContext, _MessageAction.reply),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+          ],
+        ),
+      ),
+    );
+    if (!mounted || widget.conversationId != conversationId) return;
+    switch (action) {
+      case _MessageAction.heart:
+        if (canReact) await _toggleHeart(message, userId);
+      case _MessageAction.copy:
+        await Clipboard.setData(ClipboardData(text: message.text));
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('Đã sao chép tin nhắn')));
+        }
+      case _MessageAction.reply:
+        if (canReply) {
+          setState(() {
+            _replyTo = MessageReply.fromMessage(message);
+            _showEmojiPicker = false;
+          });
+          _composerFocus.requestFocus();
+        }
+      case null:
+        break;
+    }
+  }
+
+  Future<void> _toggleHeart(ChatMessage message, String userId) async {
+    if (_heartBusy.contains(message.id)) return;
+    setState(() => _heartBusy.add(message.id));
+    try {
+      await ref
+          .read(messagesProvider(widget.conversationId).notifier)
+          .setHeart(message, hearted: !message.heartedBy.contains(userId));
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Chưa thể thả tim. Vui lòng thử lại.')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _heartBusy.remove(message.id));
     }
   }
 
@@ -231,12 +662,20 @@ class _ChatPageState extends ConsumerState<ChatPage>
         title: Row(
           children: [
             if (conversation != null) ...[
-              ChatAvatar(
-                name: conversation.title,
-                imageUrl: conversation.avatarUrl,
-                size: 38,
-                online: conversation.isOnline == true,
-                isGroup: conversation.isGroup,
+              IconButton(
+                tooltip: 'Xem thông tin ${conversation.title}',
+                padding: EdgeInsets.zero,
+                iconSize: 38,
+                onPressed: () => context.push(
+                  '/people/${Uri.encodeComponent(conversation.peerId)}',
+                ),
+                icon: ChatAvatar(
+                  name: conversation.title,
+                  imageUrl: conversation.avatarUrl,
+                  size: 38,
+                  online: conversation.isOnline == true,
+                  isGroup: conversation.isGroup,
+                ),
               ),
               const SizedBox(width: AppSpacing.md),
             ],
@@ -303,7 +742,11 @@ class _ChatPageState extends ConsumerState<ChatPage>
                                     title: 'Bắt đầu trò chuyện',
                                     message: 'Gửi lời chào để bắt đầu cuộc trò chuyện.',
                                   )
-                                : _messageList(items, currentUserId),
+                                : _messageList(
+                                    items,
+                                    currentUserId,
+                                    conversation,
+                                  ),
                           ),
                           if (_showLatestButton && messages.hasValue)
                             Positioned(
@@ -338,7 +781,7 @@ class _ChatPageState extends ConsumerState<ChatPage>
                       const SizedBox(width: AppSpacing.sm),
                       Flexible(
                         child: Text(
-                          'Ngoại tuyến · tin nhắn sẽ gửi lại khi có mạng',
+                          'Ngoại tuyến · tin văn bản sẽ gửi lại khi có mạng',
                           style: theme.textTheme.labelMedium,
                         ),
                       ),
@@ -353,7 +796,11 @@ class _ChatPageState extends ConsumerState<ChatPage>
     );
   }
 
-  Widget _messageList(List<ChatMessage> messages, String? currentUserId) {
+  Widget _messageList(
+    List<ChatMessage> messages,
+    String? currentUserId,
+    Conversation? conversation,
+  ) {
     final hasMore = ref
         .read(messagesProvider(widget.conversationId).notifier)
         .hasMore;
@@ -394,14 +841,38 @@ class _ChatPageState extends ConsumerState<ChatPage>
               messages[index - 1].createdAt.toLocal(),
               message.createdAt.toLocal(),
             );
+        final isMine = message.senderId == currentUserId;
+        final showPeerAvatar =
+            !isMine &&
+            (startsDay || messages[index - 1].senderId != message.senderId);
         return Column(
           children: [
             if (startsDay) _DayDivider(date: message.createdAt.toLocal()),
             _MessageBubble(
               message: message,
-              isMine: message.senderId == currentUserId,
+              onLongPress: () => _showMessageActions(message, currentUserId),
+              currentUserId: currentUserId,
+              isMine: isMine,
+              showPeerAvatar: showPeerAvatar,
+              peerName: conversation?.title ?? 'Người dùng',
+              peerAvatarUrl: conversation?.avatarUrl,
+              heartedByMe: message.heartedBy.contains(currentUserId),
+              onHeart:
+                  currentUserId != null &&
+                      message.sequence > 0 &&
+                      !_heartBusy.contains(message.id)
+                  ? () => _toggleHeart(message, currentUserId)
+                  : null,
               onRetry: message.status == MessageStatus.failed
                   ? () => _retryMessage(message.clientMessageId)
+                  : null,
+              playback: _voicePlayback,
+              onPlayVoice:
+                  message.kind == MessageKind.voice &&
+                      !_speechActive &&
+                      !_recording &&
+                      !_voiceBusy
+                  ? () => _toggleVoice(message)
                   : null,
             ),
           ],
@@ -417,50 +888,486 @@ class _ChatPageState extends ConsumerState<ChatPage>
       elevation: 2,
       child: SafeArea(
         top: false,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            AppSpacing.md,
-            AppSpacing.sm,
-            AppSpacing.md,
-            AppSpacing.sm,
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _composerController,
-                  minLines: 1,
-                  maxLines: 5,
-                  keyboardType: TextInputType.multiline,
-                  textCapitalization: TextCapitalization.sentences,
-                  decoration: const InputDecoration(
-                    hintText: 'Nhập tin nhắn…',
-                    isDense: true,
-                  ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (!_speechActive && _lastSpeechError != null)
+              Container(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                color: scheme.errorContainer,
+                child: Row(
+                  children: [
+                    Icon(
+                      Icons.error_outline_rounded,
+                      color: scheme.onErrorContainer,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        _lastSpeechError!,
+                        style: TextStyle(color: scheme.onErrorContainer),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Đóng thông báo giọng nói',
+                      onPressed: () => setState(() => _lastSpeechError = null),
+                      icon: const Icon(Icons.close_rounded),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(width: AppSpacing.sm),
-              ValueListenableBuilder<TextEditingValue>(
-                valueListenable: _composerController,
-                builder: (context, value, _) {
-                  final canSend = value.text.trim().isNotEmpty && !_sending;
-                  return IconButton.filled(
-                    tooltip: 'Gửi tin nhắn',
-                    onPressed: canSend ? _sendMessage : null,
-                    icon: _sending
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.send_rounded),
-                  );
-                },
+            if (_replyTo case final reply?)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+                child: _ReplyPreview(
+                  reply: reply,
+                  author: reply.senderId == ref.read(currentUserProvider)?.id
+                      ? 'Bạn'
+                      : ref
+                                .read(
+                                  conversationDetailProvider(
+                                    widget.conversationId,
+                                  ),
+                                )
+                                .asData
+                                ?.value
+                                .title ??
+                            'Người dùng',
+                  onCancel:
+                      !_recording &&
+                          _recordedVoice == null &&
+                          !_voiceBusy &&
+                          !_sending
+                      ? () => setState(() => _replyTo = null)
+                      : null,
+                  composer: true,
+                ),
+              ),
+            if (_showVoicePanel) _voicePanel(context),
+            if (_showEmojiPicker) _emojiPicker(context),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  IconButton(
+                    tooltip: _showEmojiPicker
+                        ? 'Đóng biểu tượng cảm xúc'
+                        : 'Chọn biểu tượng cảm xúc',
+                    onPressed:
+                        _speechActive || _recording || _recordedVoice != null
+                        ? null
+                        : () {
+                            FocusManager.instance.primaryFocus?.unfocus();
+                            setState(() {
+                              _showVoicePanel = false;
+                              _showEmojiPicker = !_showEmojiPicker;
+                            });
+                          },
+                    icon: Icon(
+                      _showEmojiPicker
+                          ? Icons.keyboard_rounded
+                          : Icons.emoji_emotions_outlined,
+                      color: scheme.primary,
+                    ),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      readOnly:
+                          _speechActive || _recording || _recordedVoice != null,
+                      focusNode: _composerFocus,
+                      controller: _composerController,
+                      onTap: () {
+                        if (_showEmojiPicker ||
+                            (_showVoicePanel &&
+                                !_speechActive &&
+                                !_recording &&
+                                _recordedVoice == null)) {
+                          setState(() {
+                            _showEmojiPicker = false;
+                            _showVoicePanel = false;
+                          });
+                        }
+                      },
+                      minLines: 1,
+                      maxLines: 5,
+                      keyboardType: TextInputType.multiline,
+                      textCapitalization: TextCapitalization.sentences,
+                      decoration: const InputDecoration(
+                        hintText: 'Tin nhắn',
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    key: const ValueKey('open-voice-panel'),
+                    tooltip: _showVoicePanel ? 'Đóng ghi âm' : 'Mở ghi âm',
+                    onPressed:
+                        _sending ||
+                            _voiceBusy ||
+                            _speechActive ||
+                            _recording ||
+                            _recordedVoice != null
+                        ? null
+                        : _showVoicePanel
+                        ? _closeVoicePanel
+                        : _openVoicePanel,
+                    icon: Icon(
+                      _showVoicePanel
+                          ? Icons.keyboard_voice_rounded
+                          : Icons.mic_none_rounded,
+                      color: scheme.primary,
+                    ),
+                  ),
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: _composerController,
+                    builder: (context, value, _) {
+                      final canSend = value.text.trim().isNotEmpty && !_sending;
+                      return IconButton.filled(
+                        tooltip: canSend ? 'Gửi tin nhắn' : 'Gửi tim',
+                        onPressed:
+                            _sending ||
+                                _speechActive ||
+                                _recording ||
+                                _recordedVoice != null
+                            ? null
+                            : canSend
+                            ? _sendMessage
+                            : () => _sendText('❤️'),
+                        icon: _sending
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : Icon(
+                                canSend
+                                    ? Icons.send_rounded
+                                    : Icons.favorite_rounded,
+                              ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _voicePanel(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final listening = _speechInput.state == SpeechInputState.listening;
+    final speechStarting =
+        _startingSpeech || _speechInput.state == SpeechInputState.starting;
+    final speechFinishing = _speechInput.state == SpeechInputState.finishing;
+    final busy = _voiceBusy || speechStarting || speechFinishing;
+    final active = _voiceAsText ? _speechActive : _recording;
+    final seconds = _recording
+        ? _recordingElapsed.inSeconds
+        : (_recordedVoice?.durationMs ?? 0) ~/ 1000;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 18),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border(top: BorderSide(color: scheme.outlineVariant)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Text(
+                'Ghi âm',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const Spacer(),
+              IconButton(
+                tooltip: 'Đóng bảng ghi âm',
+                onPressed: busy ? null : _closeVoicePanel,
+                icon: const Icon(Icons.close_rounded),
               ),
             ],
           ),
+          const SizedBox(height: 2),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              _voiceModeButton('Gửi bản ghi âm', false),
+              const SizedBox(width: 8),
+              _voiceModeButton('Gửi dạng văn bản', true),
+            ],
+          ),
+          const SizedBox(height: 16),
+          if (_recordedVoice != null) ...[
+            Row(
+              children: [
+                Icon(Icons.graphic_eq_rounded, color: scheme.primary),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _VoiceBars(
+                    color: scheme.primary,
+                    progress: 0,
+                    height: 30,
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Text(_voiceTime(seconds), style: theme.textTheme.labelLarge),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                TextButton.icon(
+                  onPressed: _voiceBusy ? null : _discardVoice,
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('Xóa'),
+                ),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: _voiceBusy ? null : _sendVoice,
+                  icon: _voiceBusy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send_rounded),
+                  label: const Text('Gửi bản ghi âm'),
+                ),
+              ],
+            ),
+          ] else ...[
+            if (_voiceAsText && _composerController.text.trim().isNotEmpty)
+              Container(
+                width: double.infinity,
+                constraints: const BoxConstraints(maxHeight: 84),
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: scheme.surfaceContainerLow,
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: SingleChildScrollView(
+                  child: Text(
+                    _composerController.text,
+                    style: theme.textTheme.bodyMedium,
+                  ),
+                ),
+              ),
+            if (_voiceAsText && _composerController.text.trim().isNotEmpty)
+              const SizedBox(height: 12),
+            if (_recording)
+              Text(
+                '${_voiceTime(seconds)} / 02:00',
+                style: theme.textTheme.titleLarge?.copyWith(
+                  color: scheme.error,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            if (_recording) const SizedBox(height: 12),
+            Semantics(
+              button: true,
+              label: active ? 'Dừng ghi âm' : 'Bấm để ghi âm',
+              child: InkWell(
+                key: const ValueKey('voice-record-button'),
+                onTap: busy
+                    ? null
+                    : _voiceAsText
+                    ? listening
+                          ? _speechInput.stop
+                          : _speechActive
+                          ? null
+                          : _startSpeech
+                    : _recording
+                    ? _finishVoice
+                    : _startVoice,
+                customBorder: const CircleBorder(),
+                child: Container(
+                  width: 84,
+                  height: 84,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: active ? scheme.error : scheme.primary,
+                    boxShadow: [
+                      BoxShadow(
+                        color: (active ? scheme.error : scheme.primary)
+                            .withValues(alpha: 0.22),
+                        blurRadius: 0,
+                        spreadRadius: 7,
+                      ),
+                    ],
+                  ),
+                  child: busy
+                      ? Padding(
+                          padding: const EdgeInsets.all(29),
+                          child: CircularProgressIndicator(
+                            color: scheme.onPrimary,
+                            strokeWidth: 2.5,
+                          ),
+                        )
+                      : Icon(
+                          active ? Icons.stop_rounded : Icons.mic_rounded,
+                          color: scheme.onPrimary,
+                          size: 38,
+                        ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              _voiceAsText
+                  ? speechStarting
+                        ? 'Đang mở nhận dạng giọng nói…'
+                        : speechFinishing
+                        ? 'Đang hoàn tất văn bản…'
+                        : listening
+                        ? 'Đang nghe · ${_speechInput.languageName}'
+                        : 'Bấm để nói, sau đó sửa văn bản trước khi gửi'
+                  : _recording
+                  ? 'Bấm để dừng ghi âm'
+                  : 'Bấm để ghi âm tin nhắn thoại',
+              textAlign: TextAlign.center,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: scheme.onSurfaceVariant,
+              ),
+            ),
+            if (_speechActive) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _cancelSpeech,
+                child: const Text('Hủy nhập giọng nói'),
+              ),
+            ],
+            if (_recording) ...[
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: _voiceBusy ? null : _discardVoice,
+                child: const Text('Hủy ghi âm'),
+              ),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _voiceModeButton(String label, bool asText) {
+    final scheme = Theme.of(context).colorScheme;
+    final selected = _voiceAsText == asText;
+    return Flexible(
+      child: ChoiceChip(
+        label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
+        selected: selected,
+        onSelected:
+            _speechActive || _recording || _recordedVoice != null || _voiceBusy
+            ? null
+            : (_) => _selectVoiceMode(asText),
+        selectedColor: scheme.primaryContainer,
+        labelStyle: TextStyle(
+          color: selected ? scheme.primary : scheme.onSurfaceVariant,
+          fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
         ),
+      ),
+    );
+  }
+
+  String _voiceTime(int seconds) =>
+      '${(seconds ~/ 60).toString().padLeft(2, '0')}:${(seconds % 60).toString().padLeft(2, '0')}';
+
+  Widget _emojiPicker(BuildContext context) {
+    final theme = Theme.of(context);
+    const emojis = [
+      '😀',
+      '😁',
+      '🥰',
+      '😍',
+      '😘',
+      '😎',
+      '😂',
+      '🤣',
+      '😊',
+      '😉',
+      '🤔',
+      '😭',
+      '😢',
+      '😮',
+      '😡',
+      '🥳',
+      '❤️',
+      '🧡',
+      '💙',
+      '💚',
+      '👍',
+      '👏',
+      '🙏',
+      '🔥',
+      '🎉',
+      '✨',
+      '🌹',
+      '☕',
+      '💯',
+      '👌',
+      '🙌',
+      '👋',
+    ];
+    return Container(
+      width: double.infinity,
+      height: 212,
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.sm,
+        AppSpacing.md,
+        0,
+      ),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerLow,
+        border: Border(
+          top: BorderSide(color: theme.colorScheme.outlineVariant),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(
+              left: AppSpacing.sm,
+              bottom: AppSpacing.sm,
+            ),
+            child: Text(
+              'Biểu tượng cảm xúc',
+              style: theme.textTheme.titleSmall,
+            ),
+          ),
+          Expanded(
+            child: GridView.builder(
+              keyboardDismissBehavior: ScrollViewKeyboardDismissBehavior.manual,
+              gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 8,
+                mainAxisSpacing: 4,
+                crossAxisSpacing: 4,
+              ),
+              itemCount: emojis.length,
+              itemBuilder: (context, index) => InkWell(
+                borderRadius: BorderRadius.circular(12),
+                onTap: () => _insertEmoji(emojis[index]),
+                child: Center(
+                  child: Text(
+                    emojis[index],
+                    style: const TextStyle(fontSize: 27),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -506,19 +1413,101 @@ class _DayDivider extends StatelessWidget {
   }
 }
 
-class _MessageBubble extends StatelessWidget {
-  const _MessageBubble({
-    required this.message,
-    required this.isMine,
-    this.onRetry,
+enum _MessageAction { heart, copy, reply }
+
+class _ReplyPreview extends StatelessWidget {
+  const _ReplyPreview({
+    required this.reply,
+    required this.author,
+    this.onCancel,
+    this.composer = false,
   });
 
-  final ChatMessage message;
-  final bool isMine;
-  final VoidCallback? onRetry;
+  final MessageReply reply;
+  final String author;
+  final VoidCallback? onCancel;
+  final bool composer;
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        border: Border(left: BorderSide(color: scheme.primary, width: 3)),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Flexible(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  composer ? 'Đang trả lời $author' : author,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: scheme.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  reply.kind == MessageKind.voice
+                      ? '🎤 Tin nhắn thoại'
+                      : reply.text,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ],
+            ),
+          ),
+          if (composer)
+            IconButton(
+              tooltip: 'Hủy trả lời',
+              onPressed: onCancel,
+              icon: const Icon(Icons.close_rounded, size: 20),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MessageBubble extends ConsumerWidget {
+  const _MessageBubble({
+    required this.message,
+    required this.onLongPress,
+    this.currentUserId,
+    required this.isMine,
+    required this.showPeerAvatar,
+    required this.peerName,
+    this.peerAvatarUrl,
+    required this.heartedByMe,
+    this.onHeart,
+    this.onRetry,
+    this.playback,
+    this.onPlayVoice,
+  });
+
+  final ChatMessage message;
+  final VoidCallback onLongPress;
+  final String? currentUserId;
+  final bool isMine;
+  final bool showPeerAvatar;
+  final String peerName;
+  final String? peerAvatarUrl;
+  final bool heartedByMe;
+  final VoidCallback? onHeart;
+  final VoidCallback? onRetry;
+  final VoicePlayback? playback;
+  final VoidCallback? onPlayVoice;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final timestamp = message.createdAt.toLocal();
@@ -550,72 +1539,334 @@ class _MessageBubble extends StatelessWidget {
 
     return Align(
       alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
-      child: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: math.min(MediaQuery.sizeOf(context).width, 620) * 0.78,
-        ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-          child: Column(
-            crossAxisAlignment: isMine
-                ? CrossAxisAlignment.end
-                : CrossAxisAlignment.start,
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: AppSpacing.lg,
-                  vertical: AppSpacing.md,
-                ),
-                decoration: BoxDecoration(
-                  color: isMine ? scheme.primaryContainer : scheme.surface,
-                  borderRadius: BorderRadius.only(
-                    topLeft: const Radius.circular(20),
-                    topRight: const Radius.circular(20),
-                    bottomLeft: Radius.circular(isMine ? 20 : 6),
-                    bottomRight: Radius.circular(isMine ? 6 : 20),
-                  ),
-                ),
-                child: SelectableText(
-                  message.text,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                    color: isMine
-                        ? scheme.onPrimaryContainer
-                        : scheme.onSurface,
-                    height: 1.4,
-                  ),
-                ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!isMine) ...[
+            SizedBox(
+              width: 32,
+              height: 32,
+              child: showPeerAvatar
+                  ? Tooltip(
+                      message: 'Xem thông tin $peerName',
+                      child: InkWell(
+                        customBorder: const CircleBorder(),
+                        onTap: () => context.push(
+                          '/people/${Uri.encodeComponent(message.senderId)}',
+                        ),
+                        child: ChatAvatar(
+                          name: peerName,
+                          imageUrl: peerAvatarUrl,
+                          size: 32,
+                        ),
+                      ),
+                    )
+                  : null,
+            ),
+            const SizedBox(width: AppSpacing.sm),
+          ],
+          Flexible(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth:
+                    math.min(MediaQuery.sizeOf(context).width, 620) * 0.78,
               ),
-              const SizedBox(height: AppSpacing.xs),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    time,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                      color: scheme.onSurfaceVariant,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+                child: Column(
+                  crossAxisAlignment: isMine
+                      ? CrossAxisAlignment.end
+                      : CrossAxisAlignment.start,
+                  children: [
+                    GestureDetector(
+                      key: ValueKey('message-${message.id}'),
+                      onLongPress: onLongPress,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: AppSpacing.lg,
+                          vertical: AppSpacing.md,
+                        ),
+                        decoration: BoxDecoration(
+                          color: isMine
+                              ? scheme.primaryContainer
+                              : scheme.surface,
+                          borderRadius: BorderRadius.only(
+                            topLeft: const Radius.circular(20),
+                            topRight: const Radius.circular(20),
+                            bottomLeft: Radius.circular(isMine ? 20 : 6),
+                            bottomRight: Radius.circular(isMine ? 6 : 20),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            if (message.replyTo case final reply?) ...[
+                              _ReplyPreview(
+                                reply: reply,
+                                author: reply.senderId == currentUserId
+                                    ? 'Bạn'
+                                    : peerName,
+                              ),
+                              const SizedBox(height: AppSpacing.sm),
+                            ],
+                            if (message.kind == MessageKind.voice)
+                              _VoiceBubble(
+                                message: message,
+                                playback: playback,
+                                onPlay: onPlayVoice,
+                                isMine: isMine,
+                              )
+                            else
+                              Text(
+                                message.text,
+                                style: theme.textTheme.bodyMedium?.copyWith(
+                                  fontSize: switch (ref.watch(
+                                    messageTextSizeProvider,
+                                  )) {
+                                    MessageTextSize.small => 12,
+                                    MessageTextSize.normal => 14,
+                                    MessageTextSize.large => 18,
+                                  },
+                                  color: isMine
+                                      ? scheme.onPrimaryContainer
+                                      : scheme.onSurface,
+                                  height: 1.4,
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
                     ),
-                  ),
-                  if (isMine) ...[
-                    const SizedBox(width: AppSpacing.xs),
-                    Tooltip(
-                      message: status.$1,
-                      child: Icon(status.$2, size: 15, color: status.$3),
+                    if (message.heartedBy.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Tooltip(
+                          message: heartedByMe ? 'Bỏ tim' : 'Thả tim',
+                          child: Material(
+                            color: heartedByMe
+                                ? scheme.errorContainer
+                                : scheme.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(18),
+                            child: InkWell(
+                              borderRadius: BorderRadius.circular(18),
+                              onTap: onHeart,
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 5,
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      heartedByMe
+                                          ? Icons.favorite_rounded
+                                          : Icons.favorite_border_rounded,
+                                      size: 16,
+                                      color: heartedByMe
+                                          ? scheme.error
+                                          : scheme.onSurfaceVariant,
+                                    ),
+                                    if (message.heartedBy.isNotEmpty) ...[
+                                      const SizedBox(width: 4),
+                                      Text(
+                                        '${message.heartedBy.length}',
+                                        style: theme.textTheme.labelSmall,
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    const SizedBox(height: AppSpacing.xs),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          time,
+                          style: theme.textTheme.labelSmall?.copyWith(
+                            color: scheme.onSurfaceVariant,
+                          ),
+                        ),
+                        if (isMine) ...[
+                          const SizedBox(width: AppSpacing.xs),
+                          Tooltip(
+                            message: status.$1,
+                            child: Icon(status.$2, size: 15, color: status.$3),
+                          ),
+                        ],
+                      ],
                     ),
+                    if (isMine && onRetry != null)
+                      TextButton.icon(
+                        onPressed: onRetry,
+                        icon: const Icon(Icons.refresh_rounded, size: 16),
+                        label: const Text('Gửi lại'),
+                      ),
                   ],
-                ],
-              ),
-              if (isMine && onRetry != null)
-                TextButton.icon(
-                  onPressed: onRetry,
-                  icon: const Icon(Icons.refresh_rounded, size: 16),
-                  label: const Text('Gửi lại'),
                 ),
-            ],
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
+}
+
+class _VoiceBubble extends StatelessWidget {
+  const _VoiceBubble({
+    required this.message,
+    required this.isMine,
+    this.playback,
+    this.onPlay,
+  });
+
+  final ChatMessage message;
+  final bool isMine;
+  final VoicePlayback? playback;
+  final VoidCallback? onPlay;
+
+  @override
+  Widget build(BuildContext context) {
+    final durationMs = message.voiceDurationMs ?? 0;
+    final totalSeconds = (durationMs / 1000).ceil();
+    final scheme = Theme.of(context).colorScheme;
+    final foreground = isMine ? scheme.onPrimaryContainer : scheme.primary;
+    return ListenableBuilder(
+      listenable: playback ?? const _SilentListenable(),
+      builder: (context, _) {
+        final current = playback?.messageId == message.id;
+        final loading = current && playback!.loading;
+        final playing = current && playback!.isPlaying;
+        final progress = current && durationMs > 0
+            ? (playback!.position.inMilliseconds / durationMs).clamp(0.0, 1.0)
+            : 0.0;
+        return SizedBox(
+          width: 188,
+          child: Row(
+            children: [
+              Tooltip(
+                message: playing
+                    ? 'Tạm dừng tin nhắn thoại'
+                    : 'Phát tin nhắn thoại',
+                triggerMode: TooltipTriggerMode.manual,
+                child: IconButton(
+                  onPressed: onPlay,
+                  icon: loading
+                      ? SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: foreground,
+                          ),
+                        )
+                      : Icon(
+                          playing
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          color: foreground,
+                          size: 30,
+                        ),
+                ),
+              ),
+              Expanded(
+                child: _VoiceBars(
+                  color: foreground,
+                  progress: progress,
+                  height: 28,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '${totalSeconds}s',
+                style: Theme.of(context).textTheme.labelMedium
+                    ?.copyWith(color: foreground, fontWeight: FontWeight.w600),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _VoiceBars extends StatelessWidget {
+  const _VoiceBars({
+    required this.color,
+    required this.progress,
+    required this.height,
+  });
+
+  final Color color;
+  final double progress;
+  final double height;
+
+  static const _heights = <double>[
+    .32,
+    .58,
+    .84,
+    .43,
+    .70,
+    1,
+    .55,
+    .37,
+    .76,
+    .92,
+    .48,
+    .67,
+    .36,
+    .86,
+    .62,
+    .42,
+    .94,
+    .72,
+    .38,
+    .64,
+    .80,
+    .46,
+    .59,
+    .34,
+  ];
+
+  @override
+  Widget build(BuildContext context) => SizedBox(
+    height: height,
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        for (var index = 0; index < _heights.length; index++)
+          Expanded(
+            child: Center(
+              child: Container(
+                height: height * _heights[index],
+                margin: const EdgeInsets.symmetric(horizontal: 1),
+                decoration: BoxDecoration(
+                  color: color.withValues(
+                    alpha: index / _heights.length <= progress ? 1 : .45,
+                  ),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+            ),
+          ),
+      ],
+    ),
+  );
+}
+
+class _SilentListenable extends Listenable {
+  const _SilentListenable();
+  @override
+  void addListener(VoidCallback listener) {}
+  @override
+  void removeListener(VoidCallback listener) {}
 }
 
 class _ChatMessagesSkeleton extends StatelessWidget {

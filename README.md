@@ -2,9 +2,13 @@
 
 ## Trạng thái triển khai hiện tại
 
-Kho mã đã có một luồng chat văn bản 1–1 chạy với dữ liệu thật: đăng ký/đăng nhập, tìm người dùng, tạo hội thoại, gửi và nhận tin qua API + SignalR, phân trang lịch sử, trạng thái đã đọc, lưu cache và hàng đợi gửi khi mất mạng. Flutter dùng Riverpod, GoRouter, Dio, Drift và giao diện Material 3 sáng/tối. Backend ASP.NET Core và hợp đồng OpenAPI nằm trong [`backend/`](backend/README.md). Các mục bên dưới là **đặc tả phát triển tiếp**, không phải danh sách tính năng đã hoàn tất. Chat nhóm, media, gọi, thông báo đẩy, presence và E2EE chưa được triển khai.
+Kho mã đã có một luồng chat văn bản và tin nhắn thoại 1–1 chạy với dữ liệu thật: đăng ký/đăng nhập, tìm người dùng, tạo hội thoại, gửi và nhận tin qua API + SignalR, chọn emoji, nhấn giữ để thả tim/sao chép/trả lời tin nhắn, phân trang lịch sử, trạng thái đã đọc, lưu cache và hàng đợi gửi khi mất mạng. Flutter dùng Riverpod, GoRouter, Dio, Drift và giao diện Material 3 sáng/tối. Backend ASP.NET Core và hợp đồng OpenAPI nằm trong [`backend/`](backend/README.md). Các mục bên dưới là **đặc tả phát triển tiếp**, không phải danh sách tính năng đã hoàn tất. Chat nhóm, hình ảnh/video/tài liệu, gọi, thông báo đẩy, presence và E2EE chưa được triển khai. Tin nhắn thoại ghi tối đa 2 phút, gửi tệp `.m4a` tối đa 2 MB và phát lại trong hội thoại; cần cấp quyền micro cho ứng dụng.
 
 ### Chạy thử
+
+Trong màn hình chat, chạm biểu tượng micro cạnh ô nhập để mở bảng ghi âm. Chọn **Gửi bản ghi âm** hoặc **Gửi dạng văn bản**, rồi chạm nút micro lớn để bắt đầu và chạm lần nữa để dừng. Với dạng văn bản, ứng dụng ưu tiên tiếng Việt nếu thiết bị có hỗ trợ; nếu không sẽ dùng ngôn ngữ nhận dạng mặc định và hiển thị tên ngôn ngữ đang nghe. Nội dung nhận dạng có thể sửa trong ô soạn trước khi gửi; **Hủy nhập giọng nói** khôi phục bản nháp trước khi nói. Với bản ghi âm, bạn có thể xóa hoặc gửi sau khi dừng.
+
+Nhận dạng dùng dịch vụ của Android/iOS qua [`speech_to_text`](https://pub.dev/packages/speech_to_text), dành cho câu chat ngắn và có thể cần mạng. Cần cấp quyền micro và, trên iOS, quyền nhận dạng giọng nói. Máy ảo phải có dịch vụ nhận dạng và micro hoạt động; khi dịch vụ không khả dụng, ứng dụng giữ bản nháp và cho phép thử lại. Sau khi thêm plugin, chạy lại ứng dụng hoàn toàn để nạp mã native.
 
 1. Khởi động backend trên máy phát triển:
 
@@ -21,6 +25,17 @@ Kho mã đã có một luồng chat văn bản 1–1 chạy với dữ liệu th
    ```
 
    `10.0.2.2` là địa chỉ máy host từ Android Emulator. Với iOS Simulator, dùng `http://127.0.0.1:5080`. Với hai thiết bị thật, chạy backend bằng `--urls http://0.0.0.0:5080` và truyền địa chỉ LAN của máy host qua `API_BASE_URL` trên cả hai thiết bị. Android debug cho phép HTTP để thử nghiệm nội bộ; bản phát hành phải dùng endpoint HTTPS. iOS khai báo quyền kết nối mạng nội bộ. Không sử dụng tài khoản thật trên máy chủ HTTP thử nghiệm.
+
+   Khi cập nhật mã backend hoặc thêm plugin Flutter, hãy khởi động lại backend và chạy lại ứng dụng. Hàng đợi gửi khi mất mạng hiện chỉ áp dụng cho tin văn bản; bản ghi âm gửi lỗi có thể thử lại khi còn ở màn hình chat.
+
+   Nếu dùng **Android thật cắm USB**, có thể giữ backend ở `127.0.0.1:5080` và chuyển tiếp cổng qua ADB:
+
+   ```sh
+   adb reverse tcp:5080 tcp:5080
+   flutter run --dart-define=API_BASE_URL=http://127.0.0.1:5080
+   ```
+
+   Chạy lại `adb reverse` sau khi rút/cắm lại thiết bị. Log `[API]` trong Flutter debug hiển thị địa chỉ gọi, mã HTTP hoặc loại lỗi kết nối; log không chứa header, token hay nội dung request.
 
 3. Kiểm tra mã nguồn:
 

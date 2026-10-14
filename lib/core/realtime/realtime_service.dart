@@ -18,6 +18,11 @@ class MessageCreatedEvent extends RealtimeEvent {
   final Map<String, dynamic> payload;
 }
 
+class MessageUpdatedEvent extends RealtimeEvent {
+  const MessageUpdatedEvent(this.payload);
+  final Map<String, dynamic> payload;
+}
+
 class MessageReadEvent extends RealtimeEvent {
   const MessageReadEvent(this.payload);
   final Map<String, dynamic> payload;
@@ -145,6 +150,8 @@ class RealtimeService {
     switch (message['target']) {
       case 'MessageCreated':
         _events.add(MessageCreatedEvent(payload));
+      case 'MessageUpdated':
+        _events.add(MessageUpdatedEvent(payload));
       case 'MessageRead':
         _events.add(MessageReadEvent(payload));
       case 'ConversationUpdated':

@@ -8,8 +8,18 @@ ChatMessage messageFromJson(Object? source) {
     conversationId: json['conversationId'] as String,
     senderId: json['senderId'] as String,
     text: json['text'] as String,
+    kind: json['kind'] == 'voice' ? MessageKind.voice : MessageKind.text,
+    voiceDurationMs: (json['voiceDurationMs'] as num?)?.toInt(),
+    replyTo: json['replyTo'] is Map
+        ? MessageReply.fromJson(
+            Map<String, dynamic>.from(json['replyTo'] as Map),
+          )
+        : null,
     sequence: (json['sequence'] as num).toInt(),
     createdAt: DateTime.parse(json['createdAt'] as String).toLocal(),
     status: MessageStatus.sent,
+    heartedBy: (json['heartedBy'] as List? ?? const [])
+        .map((id) => id.toString())
+        .toList(growable: false),
   );
 }

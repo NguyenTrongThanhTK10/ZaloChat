@@ -19,6 +19,9 @@ class ApiException implements Exception {
       }
       const localized = <String, String>{
         'Email is already registered.': 'Email này đã được đăng ký.',
+        'Display name must contain 1 to 80 characters.':
+            'Tên hiển thị cần từ 1 đến 80 ký tự.',
+        'A valid email address is required.': 'Vui lòng nhập email hợp lệ.',
         'Authentication is required.': 'Phiên đăng nhập đã hết hạn.',
         'Access is denied.': 'Bạn không có quyền thực hiện thao tác này.',
         'Too many requests. Try again later.':

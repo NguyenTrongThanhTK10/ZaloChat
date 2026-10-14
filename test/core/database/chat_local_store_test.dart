@@ -79,7 +79,196 @@ class _LegacyChatStore extends GeneratedDatabase {
   );
 }
 
+class _LegacyV3ChatStore extends GeneratedDatabase {
+  _LegacyV3ChatStore(super.executor);
+
+  @override
+  int get schemaVersion => 3;
+
+  @override
+  Iterable<TableInfo> get allTables => const [];
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (m) async {
+      await m.database.customStatement('''
+      CREATE TABLE messages (
+        account_id TEXT NOT NULL, id TEXT NOT NULL,
+        client_message_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+        sender_id TEXT NOT NULL, body TEXT NOT NULL,
+        sequence INTEGER NOT NULL, created_at_ms INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        PRIMARY KEY (account_id, conversation_id, sender_id, id),
+        UNIQUE (account_id, conversation_id, sender_id, client_message_id)
+      )
+    ''');
+      await m.database.customStatement('''
+        CREATE TABLE outbox (
+          account_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+          sender_id TEXT NOT NULL, client_message_id TEXT NOT NULL,
+          queued_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (account_id, conversation_id, sender_id, client_message_id)
+        )
+      ''');
+    },
+  );
+}
+
 void main() {
+  test(
+    'v5 cache upgrades and preserves queued replies after restart',
+    () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'chat-reply-test-',
+      );
+      final file = File('${directory.path}/messages.sqlite');
+      try {
+        final legacy = _LegacyV3ChatStore(NativeDatabase(file));
+        await legacy.customStatement(
+          "ALTER TABLE messages ADD COLUMN hearted_by_json TEXT NOT NULL DEFAULT '[]'",
+        );
+        await legacy.customStatement(
+          "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
+        );
+        await legacy.customStatement(
+          'ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER',
+        );
+        await legacy.customStatement('PRAGMA user_version = 5');
+        await legacy.close();
+        final upgraded = ChatLocalStore(executor: NativeDatabase(file));
+        await upgraded.enqueueOutgoing(
+          'alice',
+          ChatMessage(
+            id: 'reply-local',
+            clientMessageId: 'reply-local',
+            conversationId: 'conversation',
+            senderId: 'alice',
+            text: 'Trả lời',
+            sequence: 0,
+            createdAt: DateTime.utc(2026, 10, 14),
+            status: MessageStatus.sending,
+            replyTo: const MessageReply(
+              id: 'original',
+              senderId: 'bob',
+              text: '',
+              kind: MessageKind.voice,
+            ),
+          ),
+        );
+        await upgraded.close();
+        final reopened = ChatLocalStore(executor: NativeDatabase(file));
+        try {
+          final pending = (await reopened.loadPending('alice')).single;
+          expect(pending.replyTo?.id, 'original');
+          expect(pending.replyTo?.kind, MessageKind.voice);
+          expect(
+            (await reopened.loadMessages(
+              'alice',
+              'conversation',
+            )).single.replyTo?.senderId,
+            'bob',
+          );
+        } finally {
+          await reopened.close();
+        }
+      } finally {
+        await directory.delete(recursive: true);
+      }
+    },
+  );
+
+  test('voice message metadata survives reopening the cache', () async {
+    final directory = await Directory.systemTemp.createTemp('chat-voice-test-');
+    final file = File('${directory.path}/messages.sqlite');
+    try {
+      final first = ChatLocalStore(executor: NativeDatabase(file));
+      await first.upsertMessage(
+        'alice',
+        ChatMessage(
+          id: 'voice-1',
+          clientMessageId: 'voice-client-1',
+          conversationId: 'conversation',
+          senderId: 'bob',
+          text: '',
+          kind: MessageKind.voice,
+          voiceDurationMs: 2500,
+          sequence: 1,
+          createdAt: DateTime.utc(2026, 10, 13),
+          status: MessageStatus.sent,
+        ),
+      );
+      await first.close();
+      final reopened = ChatLocalStore(executor: NativeDatabase(file));
+      try {
+        final voice = (await reopened.loadMessages(
+          'alice',
+          'conversation',
+        )).single;
+        expect(voice.kind, MessageKind.voice);
+        expect(voice.voiceDurationMs, 2500);
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
+  test('v3 cache gains hearts and keeps them after restart', () async {
+    final directory = await Directory.systemTemp.createTemp('chat-v3-test-');
+    final file = File('${directory.path}/messages.sqlite');
+    try {
+      final legacy = _LegacyV3ChatStore(NativeDatabase(file));
+      await legacy.customStatement(
+        '''
+        INSERT INTO messages
+          (account_id, id, client_message_id, conversation_id, sender_id,
+           body, sequence, created_at_ms, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ''',
+        [
+          'alice',
+          'server-1',
+          'client-1',
+          'conversation',
+          'bob',
+          'Xin chào',
+          1,
+          DateTime.utc(2026, 10, 13).millisecondsSinceEpoch,
+          'sent',
+        ],
+      );
+      await legacy.close();
+
+      final upgraded = ChatLocalStore(executor: NativeDatabase(file));
+      final oldMessage = (await upgraded.loadMessages(
+        'alice',
+        'conversation',
+      )).single;
+      expect(oldMessage.heartedBy, isEmpty);
+      await upgraded.upsertMessage(
+        'alice',
+        oldMessage.copyWith(heartedBy: ['alice']),
+      );
+      await upgraded.close();
+
+      final reopened = ChatLocalStore(executor: NativeDatabase(file));
+      try {
+        expect(
+          (await reopened.loadMessages(
+            'alice',
+            'conversation',
+          )).single.heartedBy,
+          ['alice'],
+        );
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
+
   test(
     'outbox survives restart and acknowledgement removes the local echo',
     () async {
@@ -358,6 +547,52 @@ void main() {
         expect(await store.loadPending('alice'), isEmpty);
         expect(await store.loadMessages('alice', 'second'), isEmpty);
         expect(await store.loadMessages('alice', 'first'), hasLength(2));
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  test(
+    'clearing downloaded history preserves queued sends and other accounts',
+    () async {
+      final store = ChatLocalStore(executor: NativeDatabase.memory());
+      try {
+        await store.upsertConversation(
+          'alice',
+          const Conversation(id: 'chat', title: 'Bob', peerId: 'bob'),
+        );
+        await store.upsertMessage(
+          'alice',
+          _message(
+            id: 'sent',
+            clientMessageId: 'sent',
+            status: MessageStatus.sent,
+          ),
+        );
+        await store.upsertMessage(
+          'bob',
+          _message(
+            id: 'other',
+            clientMessageId: 'other',
+            status: MessageStatus.sent,
+          ),
+        );
+        await store.enqueueOutgoing(
+          'alice',
+          _message(id: 'queued', clientMessageId: 'queued'),
+        );
+
+        expect(await store.clearDownloadedHistory('alice'), isFalse);
+        expect(await store.loadPending('alice'), hasLength(1));
+        expect(await store.loadConversations('alice'), hasLength(1));
+
+        await store.removePending('alice', 'conversation', 'queued');
+        expect(await store.loadMessages('alice', 'conversation'), hasLength(1));
+        expect(await store.clearDownloadedHistory('alice'), isTrue);
+        expect(await store.loadMessages('alice', 'conversation'), isEmpty);
+        expect(await store.loadConversations('alice'), isEmpty);
+        expect(await store.loadMessages('bob', 'conversation'), hasLength(1));
       } finally {
         await store.close();
       }

@@ -15,6 +15,7 @@ public static class AuthEndpoints
         auth.MapPost("/login", LoginAsync).RequireRateLimiting("auth");
         auth.MapPost("/refresh", RefreshAsync).RequireRateLimiting("auth");
         auth.MapGet("/me", GetMeAsync).RequireAuthorization();
+        auth.MapPut("/me", UpdateMeAsync).RequireAuthorization();
     }
 
     public static Guid CurrentUserId(this ClaimsPrincipal user) =>
@@ -102,6 +103,33 @@ public static class AuthEndpoints
             state.Users.FirstOrDefault(existing => existing.Id == userId), cancellationToken);
         if (user is null) throw ApiException.Unauthorized();
         return Results.Ok(UserDto.From(user));
+    }
+
+    private static async Task<IResult> UpdateMeAsync(
+        UpdateProfileRequest request, ClaimsPrincipal principal, ChatStore store,
+        CancellationToken cancellationToken)
+    {
+        var displayName = request.DisplayName?.Trim();
+        var email = request.Email?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(displayName) || displayName.Length > 80)
+            throw ApiException.Validation("Display name must contain 1 to 80 characters.");
+        if (string.IsNullOrWhiteSpace(email) || email.Length > 254 ||
+            !MailAddress.TryCreate(email, out var address) ||
+            !string.Equals(address.Address, email, StringComparison.OrdinalIgnoreCase))
+            throw ApiException.Validation("A valid email address is required.");
+
+        var userId = principal.CurrentUserId();
+        var updated = await store.MutateAsync(state =>
+        {
+            var user = state.Users.FirstOrDefault(existing => existing.Id == userId)
+                ?? throw ApiException.Unauthorized();
+            if (state.Users.Any(existing => existing.Id != userId && existing.Email == email))
+                throw ApiException.Conflict("Email is already registered.");
+            user.DisplayName = displayName;
+            user.Email = email;
+            return UserDto.From(user);
+        }, cancellationToken);
+        return Results.Ok(updated);
     }
 
     private static RefreshSessionRecord NewSession(Guid userId, string tokenHash) => new()

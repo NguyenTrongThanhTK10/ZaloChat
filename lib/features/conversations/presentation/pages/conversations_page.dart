@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../../../app/chat_preferences_provider.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/chat_avatar.dart';
 import '../../../../core/widgets/content_state.dart';
@@ -161,6 +162,10 @@ class _ConversationsPageState extends ConsumerState<ConversationsPage> {
                           final conversation = visible[index];
                           return _ConversationTile(
                             conversation: conversation,
+                            showPreview: ref.watch(messagePreviewProvider),
+                            onAvatarTap: () => context.push(
+                              '/people/${Uri.encodeComponent(conversation.peerId)}',
+                            ),
                             onTap: () => context.push(
                               '/chat/${Uri.encodeComponent(conversation.id)}',
                             ),
@@ -344,9 +349,21 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                                 horizontal: AppSpacing.lg,
                                 vertical: AppSpacing.xs,
                               ),
-                              leading: ChatAvatar(
-                                name: user.displayName,
-                                size: 44,
+                              leading: IconButton(
+                                tooltip: 'Xem thông tin ${user.displayName}',
+                                padding: EdgeInsets.zero,
+                                iconSize: 44,
+                                onPressed: () {
+                                  final router = GoRouter.of(context);
+                                  Navigator.pop(context);
+                                  router.push(
+                                    '/people/${Uri.encodeComponent(user.id)}',
+                                  );
+                                },
+                                icon: ChatAvatar(
+                                  name: user.displayName,
+                                  size: 44,
+                                ),
                               ),
                               title: Text(
                                 user.displayName,
@@ -447,10 +464,17 @@ class _SearchAndFilters extends StatelessWidget {
 }
 
 class _ConversationTile extends StatelessWidget {
-  const _ConversationTile({required this.conversation, required this.onTap});
+  const _ConversationTile({
+    required this.conversation,
+    required this.onTap,
+    required this.onAvatarTap,
+    required this.showPreview,
+  });
 
   final Conversation conversation;
   final VoidCallback onTap;
+  final VoidCallback onAvatarTap;
+  final bool showPreview;
 
   @override
   Widget build(BuildContext context) {
@@ -473,11 +497,17 @@ class _ConversationTile extends StatelessWidget {
           ),
           child: Row(
             children: [
-              ChatAvatar(
-                name: conversation.title,
-                imageUrl: conversation.avatarUrl,
-                online: conversation.isOnline == true,
-                isGroup: conversation.isGroup,
+              IconButton(
+                tooltip: 'Xem thông tin ${conversation.title}',
+                padding: EdgeInsets.zero,
+                iconSize: 52,
+                onPressed: onAvatarTap,
+                icon: ChatAvatar(
+                  name: conversation.title,
+                  imageUrl: conversation.avatarUrl,
+                  online: conversation.isOnline == true,
+                  isGroup: conversation.isGroup,
+                ),
               ),
               const SizedBox(width: AppSpacing.md),
               Expanded(
@@ -517,7 +547,7 @@ class _ConversationTile extends StatelessWidget {
                       children: [
                         Expanded(
                           child: Text(
-                            preview,
+                            showPreview ? preview : 'Nội dung tin nhắn đã ẩn',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodyMedium?.copyWith(

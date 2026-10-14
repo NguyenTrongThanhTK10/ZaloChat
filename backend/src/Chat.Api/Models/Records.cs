@@ -47,8 +47,13 @@ public sealed class MessageRecord
     public Guid ConversationId { get; set; }
     public Guid SenderId { get; set; }
     public string Text { get; set; } = "";
+    public string Kind { get; set; } = "text";
+    public int? VoiceDurationMs { get; set; }
+    public string? VoiceSha256 { get; set; }
     public long Sequence { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    public List<Guid> HeartedBy { get; set; } = [];
+    public MessageReplyDto? ReplyTo { get; set; }
 }
 
 public sealed class RefreshSessionRecord
@@ -65,18 +70,26 @@ public sealed record UserDto(Guid Id, string DisplayName, string Email)
     public static UserDto From(UserRecord user) => new(user.Id, user.DisplayName, user.Email);
 }
 
+public sealed record MessageReplyDto(Guid Id, Guid SenderId, string Text, string Kind);
+
 public sealed record MessageDto(
     Guid Id,
     Guid ClientMessageId,
     Guid ConversationId,
     Guid SenderId,
     string Text,
+    string Kind,
+    int? VoiceDurationMs,
     long Sequence,
-    DateTimeOffset CreatedAt)
+    DateTimeOffset CreatedAt,
+    IReadOnlyList<Guid> HeartedBy,
+    MessageReplyDto? ReplyTo)
 {
     public static MessageDto From(MessageRecord message) => new(
         message.Id, message.ClientMessageId, message.ConversationId,
-        message.SenderId, message.Text, message.Sequence, message.CreatedAt);
+        message.SenderId, message.Text, message.Kind, message.VoiceDurationMs,
+        message.Sequence, message.CreatedAt,
+        message.HeartedBy.ToArray(), message.ReplyTo);
 }
 
 public sealed record ConversationDto(
@@ -96,6 +109,8 @@ public sealed record ApiError(string Code, string Message);
 public sealed record RegisterRequest(string? DisplayName, string? Email, string? Password);
 public sealed record LoginRequest(string? Email, string? Password);
 public sealed record RefreshRequest(string? RefreshToken);
+public sealed record UpdateProfileRequest(string? DisplayName, string? Email);
 public sealed record CreateConversationRequest(Guid PeerUserId);
-public sealed record SendMessageRequest(Guid ClientMessageId, string? Text);
+public sealed record SendMessageRequest(Guid ClientMessageId, string? Text,
+    Guid? ReplyToMessageId = null);
 public sealed record MarkReadRequest(long ThroughSequence);

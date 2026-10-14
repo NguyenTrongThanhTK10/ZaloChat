@@ -16,7 +16,10 @@ import '../../domain/entities/chat_message.dart';
 import '../../domain/repositories/message_repository.dart';
 
 final messageRepositoryProvider = Provider<MessageRepository>((ref) {
-  return RemoteMessageRepository(ref.watch(apiClientProvider).dio);
+  return RemoteMessageRepository(
+    ref.watch(apiClientProvider).dio,
+    ref.watch(currentUserProvider)?.id,
+  );
 });
 
 final messagesProvider =
@@ -123,7 +126,7 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
     }
   }
 
-  Future<void> send(String text) async {
+  Future<void> send(String text, {MessageReply? replyTo}) async {
     final body = text.trim();
     final accountId = _accountId;
     if (body.isEmpty || accountId == null) return;
@@ -140,10 +143,38 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
       sequence: 0,
       createdAt: DateTime.now().toUtc(),
       status: MessageStatus.sending,
+      replyTo: replyTo,
     );
     await ref.read(chatLocalStoreProvider).enqueueOutgoing(accountId, pending);
     state = AsyncData(_merge(state.asData?.value ?? const [], [pending]));
     await _sendPending(pending);
+  }
+
+  Future<void> sendVoice(
+    String filePath,
+    int durationMs, {
+    required String clientMessageId,
+    MessageReply? replyTo,
+  }) async {
+    final accountId = _accountId;
+    if (accountId == null) throw StateError('Sign in to send voice messages');
+    final message = await ref
+        .read(messageRepositoryProvider)
+        .sendVoice(
+          conversationId,
+          clientMessageId,
+          filePath,
+          durationMs,
+          replyToMessageId: replyTo?.id,
+        );
+    await ref.read(chatLocalStoreProvider).upsertMessage(accountId, message);
+    state = AsyncData(_merge(state.asData?.value ?? const [], [message]));
+    unawaited(
+      ref
+          .read(conversationListProvider.notifier)
+          .refresh()
+          .catchError((Object _) {}),
+    );
   }
 
   Future<void> retry(String clientMessageId) async {
@@ -163,13 +194,46 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
     await _sendPending(pending);
   }
 
+  Future<void> setHeart(ChatMessage message, {required bool hearted}) async {
+    if (message.sequence == 0) return;
+    final updated = await ref
+        .read(messageRepositoryProvider)
+        .setHeart(message.id, hearted: hearted);
+    _applyUpdatedMessage(updated);
+  }
+
+  void _applyUpdatedMessage(ChatMessage updated) {
+    if (updated.conversationId != conversationId) return;
+    final current = state.asData?.value;
+    if (current == null) return;
+    final index = current.indexWhere((message) => message.id == updated.id);
+    if (index < 0) return;
+    final message = updated.copyWith(status: current[index].status);
+    state = AsyncData([
+      ...current.take(index),
+      message,
+      ...current.skip(index + 1),
+    ]);
+    final accountId = _accountId;
+    if (accountId != null) {
+      unawaited(
+        ref.read(chatLocalStoreProvider).upsertMessage(accountId, message),
+      );
+    }
+  }
+
   Future<void> _sendPending(ChatMessage pending) async {
     final accountId = _accountId;
     if (accountId == null) return;
     try {
       final sent = await ref
           .read(messageRepositoryProvider)
-          .send(conversationId, pending.clientMessageId, pending.text);
+          .send(
+            conversationId,
+            pending.clientMessageId,
+            pending.text,
+            replyToMessageId: pending.replyTo?.id,
+          );
       await ref
           .read(chatLocalStoreProvider)
           .markSent(accountId, pending.clientMessageId, sent);
@@ -216,6 +280,8 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
         );
       }
       state = AsyncData(_merge(state.asData?.value ?? const [], [message]));
+    } else if (event is MessageUpdatedEvent) {
+      _applyUpdatedMessage(messageFromJson(event.payload));
     } else if (event is MessageReadEvent &&
         event.payload['conversationId'] == conversationId &&
         event.payload['userId'] != _accountId) {
@@ -351,6 +417,7 @@ class OutboxSync {
             message.conversationId,
             message.clientMessageId,
             message.text,
+            replyToMessageId: message.replyTo?.id,
           );
           await _store.markSent(_accountId, message.clientMessageId, sent);
           _onSent(message.conversationId);

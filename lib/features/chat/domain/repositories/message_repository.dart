@@ -11,6 +11,19 @@ abstract class MessageRepository {
   Future<ChatMessage> send(
     String conversationId,
     String clientMessageId,
-    String text,
-  );
+    String text, {
+    String? replyToMessageId,
+  });
+
+  Future<ChatMessage> sendVoice(
+    String conversationId,
+    String clientMessageId,
+    String filePath,
+    int durationMs, {
+    String? replyToMessageId,
+  });
+
+  Future<String> downloadVoice(String messageId);
+
+  Future<ChatMessage> setHeart(String messageId, {required bool hearted});
 }

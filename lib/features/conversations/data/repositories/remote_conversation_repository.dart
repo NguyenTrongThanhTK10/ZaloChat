@@ -12,6 +12,18 @@ class RemoteConversationRepository implements ConversationRepository {
   final Dio _dio;
 
   @override
+  Future<ChatUser> getUser(String userId) async {
+    try {
+      final response = await _dio.get(
+        '/api/users/${Uri.encodeComponent(userId)}',
+      );
+      return _userFromJson(response.data);
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  @override
   Future<List<Conversation>> list() async {
     try {
       final response = await _dio.get('/api/conversations');
@@ -30,19 +42,19 @@ class RemoteConversationRepository implements ConversationRepository {
         '/api/users',
         queryParameters: {'query': query},
       );
-      return (response.data as List)
-          .map((item) {
-            final json = Map<String, dynamic>.from(item as Map);
-            return ChatUser(
-              id: json['id'] as String,
-              displayName: json['displayName'] as String,
-              email: json['email'] as String,
-            );
-          })
-          .toList(growable: false);
+      return (response.data as List).map(_userFromJson).toList(growable: false);
     } catch (error) {
       throw ApiException.from(error);
     }
+  }
+
+  ChatUser _userFromJson(Object? source) {
+    final json = Map<String, dynamic>.from(source as Map);
+    return ChatUser(
+      id: json['id'] as String,
+      displayName: json['displayName'] as String,
+      email: json['email'] as String,
+    );
   }
 
   @override

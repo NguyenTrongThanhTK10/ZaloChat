@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 
@@ -13,7 +15,7 @@ class ChatLocalStore extends GeneratedDatabase {
     : super(executor ?? driftDatabase(name: 'appchatdemo_chat'));
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 6;
 
   // The schema is created with SQL below, so it needs no generated Drift code.
   @override
@@ -29,6 +31,24 @@ class ChatLocalStore extends GeneratedDatabase {
     onUpgrade: (m, from, to) async {
       if (from < 2) await _createConversationSchema(m.database);
       if (from < 3) await _migrateMessageKeys(m.database);
+      if (from == 3) {
+        await m.database.customStatement(
+          "ALTER TABLE messages ADD COLUMN hearted_by_json TEXT NOT NULL DEFAULT '[]'",
+        );
+      }
+      if (from >= 3 && from < 5) {
+        await m.database.customStatement(
+          "ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'",
+        );
+        await m.database.customStatement(
+          'ALTER TABLE messages ADD COLUMN voice_duration_ms INTEGER',
+        );
+      }
+      if (from >= 3 && from < 6) {
+        await m.database.customStatement(
+          'ALTER TABLE messages ADD COLUMN reply_to_json TEXT',
+        );
+      }
     },
   );
 
@@ -44,6 +64,10 @@ class ChatLocalStore extends GeneratedDatabase {
         sequence INTEGER NOT NULL CHECK (sequence >= 0),
         created_at_ms INTEGER NOT NULL,
         status TEXT NOT NULL,
+        hearted_by_json TEXT NOT NULL DEFAULT '[]',
+        kind TEXT NOT NULL DEFAULT 'text',
+        voice_duration_ms INTEGER,
+        reply_to_json TEXT,
         PRIMARY KEY (account_id, conversation_id, sender_id, id),
         UNIQUE (account_id, conversation_id, sender_id, client_message_id)
       )
@@ -276,7 +300,8 @@ class ChatLocalStore extends GeneratedDatabase {
     final rows = await customSelect(
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
-               sequence, created_at_ms, status
+               sequence, created_at_ms, status, hearted_by_json, kind,
+               voice_duration_ms, reply_to_json
         FROM messages
         WHERE account_id = ? AND conversation_id = ?
           ${olderPage ? 'AND sequence > 0 AND sequence < ?' : ''}
@@ -343,7 +368,8 @@ class ChatLocalStore extends GeneratedDatabase {
     final rows = await customSelect(
       '''
         SELECT m.id, m.client_message_id, m.conversation_id, m.sender_id,
-               m.body, m.sequence, m.created_at_ms, m.status
+               m.body, m.sequence, m.created_at_ms, m.status,
+               m.hearted_by_json, m.kind, m.voice_duration_ms, m.reply_to_json
         FROM outbox AS o
         JOIN messages AS m
           ON m.account_id = o.account_id
@@ -459,6 +485,25 @@ class ChatLocalStore extends GeneratedDatabase {
     ]);
   });
 
+  /// Clears downloaded history only when no outgoing messages are queued.
+  /// The server copy remains available for the next refresh.
+  Future<bool> clearDownloadedHistory(String accountId) =>
+      transaction(() async {
+        final pending = await customSelect(
+          'SELECT 1 FROM outbox WHERE account_id = ? LIMIT 1',
+          variables: [Variable.withString(accountId)],
+        ).get();
+        if (pending.isNotEmpty) return false;
+        await customStatement(
+          'DELETE FROM conversations WHERE account_id = ?',
+          [accountId],
+        );
+        await customStatement('DELETE FROM messages WHERE account_id = ?', [
+          accountId,
+        ]);
+        return true;
+      });
+
   Future<ChatMessage> _upsertMessage(
     String accountId,
     ChatMessage message,
@@ -466,7 +511,8 @@ class ChatLocalStore extends GeneratedDatabase {
     final existingRows = await customSelect(
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
-               sequence, created_at_ms, status
+               sequence, created_at_ms, status, hearted_by_json, kind,
+               voice_duration_ms, reply_to_json
         FROM messages
         WHERE account_id = ? AND conversation_id = ? AND sender_id = ?
           AND (id = ? OR client_message_id = ?)
@@ -512,8 +558,9 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         INSERT INTO messages
           (account_id, id, client_message_id, conversation_id, sender_id,
-           body, sequence, created_at_ms, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           body, sequence, created_at_ms, status, hearted_by_json, kind,
+           voice_duration_ms, reply_to_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         accountId,
@@ -525,6 +572,10 @@ class ChatLocalStore extends GeneratedDatabase {
         value.sequence,
         value.createdAt.toUtc().millisecondsSinceEpoch,
         value.status.name,
+        jsonEncode(value.heartedBy),
+        value.kind.name,
+        value.voiceDurationMs,
+        value.replyTo == null ? null : jsonEncode(value.replyTo!.toJson()),
       ],
     );
 
@@ -565,6 +616,16 @@ class ChatLocalStore extends GeneratedDatabase {
       isUtc: true,
     ),
     status: MessageStatus.values.byName(row.read<String>('status')),
+    heartedBy: (jsonDecode(row.read<String>('hearted_by_json')) as List)
+        .cast<String>(),
+    kind: MessageKind.values.byName(row.read<String>('kind')),
+    voiceDurationMs: row.read<int?>('voice_duration_ms'),
+    replyTo: row.read<String?>('reply_to_json') == null
+        ? null
+        : MessageReply.fromJson(
+            jsonDecode(row.read<String>('reply_to_json'))
+                as Map<String, dynamic>,
+          ),
   );
 
   int _deliveryRank(MessageStatus status) => switch (status) {

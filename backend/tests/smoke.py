@@ -152,6 +152,160 @@ class ChatApiSmokeTest(unittest.TestCase):
             raw = response.read()
             return response.status, json.loads(raw) if raw else None
 
+    def voice_request(self, path, token, client_id, audio, duration_ms=1500, reply_id=None):
+        boundary = 'voice-' + uuid4().hex
+        fields = [
+            ("clientMessageId", client_id.encode()),
+            ("durationMs", str(duration_ms).encode()),
+        ]
+        if reply_id is not None:
+            fields.append(("replyToMessageId", reply_id.encode()))
+        body = bytearray()
+        for name, value in fields:
+            body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n'.encode())
+            body.extend(value + b'\r\n')
+        body.extend(f'--{boundary}\r\nContent-Disposition: form-data; name="audio"; filename="voice.m4a"\r\nContent-Type: audio/mp4\r\n\r\n'.encode())
+        body.extend(audio)
+        body.extend(f'\r\n--{boundary}--\r\n'.encode())
+        request = Request(self.base + path, data=bytes(body), headers={
+            "Authorization": "Bearer " + token,
+            "Content-Type": "multipart/form-data; boundary=" + boundary,
+        }, method="POST")
+        try:
+            response = urlopen(request, timeout=5)
+        except HTTPError as error:
+            response = error
+        with response:
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else None
+
+    def test_update_profile_validation_and_persistence(self):
+        suffix = uuid4().hex[:8]
+        original_email = f"profile-alice-{suffix}@example.com"
+        new_email = f"profile-updated-{suffix}@example.com"
+        other_email = f"profile-bob-{suffix}@example.com"
+        _, alice = self.request("POST", "/api/auth/register", {
+            "displayName": "Alice", "email": original_email,
+            "password": "profile-pass-123",
+        })
+        _, bob = self.request("POST", "/api/auth/register", {
+            "displayName": "Bob", "email": other_email,
+            "password": "profile-pass-123",
+        })
+        token = alice["accessToken"]
+
+        self.assertEqual(self.request("PUT", "/api/auth/me", {
+            "displayName": "Alice Updated", "email": new_email,
+        })[0], 401)
+        self.assertEqual(self.request("PUT", "/api/auth/me", {
+            "displayName": " ", "email": new_email,
+        }, token)[0], 400)
+        self.assertEqual(self.request("PUT", "/api/auth/me", {
+            "displayName": "Alice Updated", "email": other_email,
+        }, token)[0], 409)
+        self.assertEqual(self.request("GET", "/api/auth/me", token=token)[1]["email"],
+                         original_email)
+
+        status, updated = self.request("PUT", "/api/auth/me", {
+            "displayName": "  Alice Updated  ", "email": f"  {new_email.upper()}  ",
+        }, token)
+        self.assertEqual(status, 200)
+        self.assertEqual(updated, {
+            "id": alice["user"]["id"],
+            "displayName": "Alice Updated",
+            "email": new_email,
+        })
+        self.assertEqual(self.request("GET", "/api/auth/me", token=token)[1], updated)
+        self.assertEqual(self.request("GET", "/api/auth/me",
+                                      token=bob["accessToken"])[1]["email"], other_email)
+        self.assertEqual(self.request("POST", "/api/auth/login", {
+            "email": original_email, "password": "profile-pass-123",
+        })[0], 401)
+        self.assertEqual(self.request("POST", "/api/auth/login", {
+            "email": new_email, "password": "profile-pass-123",
+        })[1]["user"], updated)
+
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(self.request("GET", "/api/auth/me", token=token)[1], updated)
+
+    def test_voice_message_upload_playback_and_access(self):
+        suffix = uuid4().hex[:8]
+        accounts = []
+        for name in ("Alice", "Bob", "Stranger"):
+            _, account = self.request("POST", "/api/auth/register", {
+                "displayName": name,
+                "email": f"voice-{name.lower()}-{suffix}@example.com",
+                "password": "voice-pass-123",
+            })
+            accounts.append(account)
+        alice, bob, stranger = accounts
+        a, b, outsider = [account["accessToken"] for account in accounts]
+        _, conversation = self.request("POST", "/api/conversations", {
+            "peerUserId": bob["user"]["id"],
+        }, a)
+        cid = conversation["id"]
+        _, original = self.request("POST", f"/api/conversations/{cid}/messages", {
+            "clientMessageId": str(uuid4()), "text": "Tin gốc để trả lời",
+        }, a)
+        path = f"/api/conversations/{cid}/voice"
+        client_id = str(uuid4())
+        audio = b"\x00\x00\x00\x18ftypM4A " + b"test-voice-data"
+        self.assertEqual(self.voice_request(path, outsider, client_id, audio)[0], 404)
+        self.assertEqual(self.voice_request(path, a, client_id, b"not-an-m4a")[0], 400)
+        status, voice = self.voice_request(path, a, client_id, audio,
+                                           reply_id=original["id"])
+        self.assertEqual(status, 201)
+        self.assertEqual((voice["kind"], voice["voiceDurationMs"], voice["text"]),
+                         ("voice", 1500, ""))
+        self.assertEqual(voice["replyTo"]["id"], original["id"])
+        self.assertEqual(voice["replyTo"]["text"], original["text"])
+        self.assertEqual(self.voice_request(path, a, client_id, audio,
+                                           reply_id=original["id"])[0], 200)
+        self.assertEqual(self.voice_request(path, a, client_id, audio)[0], 409)
+        self.assertEqual(self.voice_request(path, a, client_id, audio + b"changed")[0], 409)
+        self.assertEqual(self.voice_request(path, a, str(uuid4()), audio, 121000)[0], 400)
+        self.assertEqual(self.voice_request(path, a, str(uuid4()), audio + b"0" * 2_000_000)[0], 400)
+        audio_path = f"/api/messages/{voice['id']}/audio"
+        self.assertEqual(self.request("GET", audio_path, token=outsider)[0], 404)
+        self.assertEqual(self.request("GET", audio_path)[0], 401)
+        for token in (a, b):
+            request = Request(self.base + audio_path, headers={"Authorization": "Bearer " + token})
+            with urlopen(request, timeout=5) as response:
+                self.assertEqual(response.headers["Content-Type"], "audio/mp4")
+                self.assertEqual(response.read(), audio)
+        history = self.request("GET", f"/api/conversations/{cid}/messages", token=b)[1]
+        self.assertEqual(history["items"][0]["id"], voice["id"])
+        reply_body = {"clientMessageId": str(uuid4()), "text": "Trả lời bằng văn bản",
+                      "replyToMessageId": voice["id"]}
+        status, reply = self.request("POST", f"/api/conversations/{cid}/messages", reply_body, b)
+        self.assertEqual(status, 201)
+        self.assertEqual(reply["replyTo"]["kind"], "voice")
+        self.assertEqual(reply["replyTo"]["senderId"], alice["user"]["id"])
+        self.assertEqual(self.request("POST", f"/api/conversations/{cid}/messages", reply_body, b)[0], 200)
+        self.assertEqual(self.request("POST", f"/api/conversations/{cid}/messages", {
+            **reply_body, "replyToMessageId": original["id"],
+        }, b)[0], 409)
+        _, other = self.request("POST", "/api/conversations", {
+            "peerUserId": stranger["user"]["id"],
+        }, a)
+        self.assertEqual(self.request("POST", f"/api/conversations/{other['id']}/messages", {
+            **reply_body, "clientMessageId": str(uuid4()),
+        }, a)[0], 400)
+        self.assertEqual(self.request("POST", f"/api/conversations/{cid}/messages", {
+            **reply_body, "clientMessageId": str(uuid4()), "replyToMessageId": str(uuid4()),
+        }, a)[0], 400)
+        self.assertEqual(self.voice_request(path, a, str(uuid4()), audio,
+                                           reply_id=str(uuid4()))[0], 400)
+        self.stop_server()
+        self.start_server()
+        history = self.request("GET", f"/api/conversations/{cid}/messages", token=b)[1]
+        self.assertEqual(history["items"][0]["replyTo"]["id"], voice["id"])
+        self.assertEqual(history["items"][1]["replyTo"]["text"], original["text"])
+        request = Request(self.base + audio_path, headers={"Authorization": "Bearer " + a})
+        with urlopen(request, timeout=5) as response:
+            self.assertEqual(response.read(), audio)
+
     def test_two_account_chat_and_restart(self):
         suffix = uuid4().hex[:8]
         _, alice = self.request("POST", "/api/auth/register", {
@@ -176,6 +330,11 @@ class ChatApiSmokeTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/api/auth/me", token=a)[1]["id"], alice["user"]["id"])
         self.assertEqual(self.request("GET", "/api/auth/me", token=a + "x")[0], 401)
         self.assertEqual(self.request("GET", "/api/users?query=Bob", token=a)[1][0]["id"], bob["user"]["id"])
+        self.assertEqual(self.request("GET", f"/api/users/{bob['user']['id']}", token=a),
+                         (200, bob["user"]))
+        self.assertEqual(self.request("GET", f"/api/users/{bob['user']['id']}")[0], 401)
+        self.assertEqual(self.request("GET", f"/api/users/{alice['user']['id']}", token=a)[0], 404)
+        self.assertEqual(self.request("GET", f"/api/users/{uuid4()}", token=a)[0], 404)
         self.assertEqual(self.request("POST", "/api/auth/login", {
             "email": alice["user"]["email"], "password": "wrong-password",
         })[0], 401)
@@ -194,7 +353,7 @@ class ChatApiSmokeTest(unittest.TestCase):
         }, a)
         self.assertEqual((status, error["code"]), (400, "validation_error"))
 
-        first_payload = {"clientMessageId": str(uuid4()), "text": "Xin chào!"}
+        first_payload = {"clientMessageId": str(uuid4()), "text": "Xin chào! 🥰"}
         realtime = SignalRSocket(self.port, bob_negotiation["connectionToken"], b)
         try:
             time.sleep(0.1)  # Let OnConnectedAsync add Bob to his private user group.
@@ -202,6 +361,20 @@ class ChatApiSmokeTest(unittest.TestCase):
             event = realtime.next_record()
             self.assertEqual(event["target"], "MessageCreated")
             self.assertEqual(event["arguments"][0]["id"], first["id"])
+            heart_path = f"/api/messages/{first['id']}/heart"
+            self.assertEqual(self.request("PUT", heart_path, token=outsider)[0], 404)
+            heart_status, hearted = self.request("PUT", heart_path, token=b)
+            self.assertEqual(heart_status, 200)
+            self.assertEqual(hearted["heartedBy"], [bob["user"]["id"]])
+            heart_event = realtime.next_record()
+            while heart_event.get("target") == "ConversationUpdated":
+                heart_event = realtime.next_record()
+            self.assertEqual(heart_event["target"], "MessageUpdated")
+            self.assertEqual(heart_event["arguments"][0]["heartedBy"], hearted["heartedBy"])
+            self.assertEqual(self.request("PUT", heart_path, token=b)[1]["heartedBy"], hearted["heartedBy"])
+            self.assertEqual(len(self.request("PUT", heart_path, token=a)[1]["heartedBy"]), 2)
+            self.assertEqual(self.request("DELETE", heart_path, token=b)[1]["heartedBy"], [alice["user"]["id"]])
+            self.assertEqual(self.request("DELETE", heart_path, token=b)[1]["heartedBy"], [alice["user"]["id"]])
         finally:
             realtime.close()
         self.assertEqual(status, 201)
@@ -221,6 +394,7 @@ class ChatApiSmokeTest(unittest.TestCase):
         self.assertEqual(page["nextCursor"], 2)
         older = self.request("GET", f"/api/conversations/{cid}/messages?limit=1&beforeSequence=2", token=a)[1]
         self.assertEqual([item["sequence"] for item in older["items"]], [1])
+        self.assertEqual(older["items"][0]["heartedBy"], [alice["user"]["id"]])
         self.assertIsNone(older["nextCursor"])
         self.assertEqual(self.request("GET", "/api/conversations", token=a)[1][0]["unreadCount"], 1)
         self.assertEqual(self.request("POST", f"/api/conversations/{cid}/read", {
@@ -250,6 +424,8 @@ class ChatApiSmokeTest(unittest.TestCase):
         self.assertEqual(status, 200)
         history = self.request("GET", f"/api/conversations/{cid}/messages", token=login["accessToken"])[1]
         self.assertEqual([item["sequence"] for item in history["items"]], [2, 1])
+        self.assertEqual(history["items"][1]["text"], "Xin chào! 🥰")
+        self.assertEqual(history["items"][1]["heartedBy"], [alice["user"]["id"]])
 
 
 if __name__ == "__main__":

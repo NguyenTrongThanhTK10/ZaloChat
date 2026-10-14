@@ -104,9 +104,17 @@ class _PeoplePageState extends ConsumerState<PeoplePage> {
                           itemBuilder: (context, index) {
                             final user = items[index];
                             return ListTile(
-                              leading: ChatAvatar(
-                                name: user.displayName,
-                                size: 44,
+                              leading: IconButton(
+                                tooltip: 'Xem thông tin ${user.displayName}',
+                                padding: EdgeInsets.zero,
+                                iconSize: 44,
+                                onPressed: () => context.push(
+                                  '/people/${Uri.encodeComponent(user.id)}',
+                                ),
+                                icon: ChatAvatar(
+                                  name: user.displayName,
+                                  size: 44,
+                                ),
                               ),
                               title: Text(user.displayName),
                               subtitle: Text(user.email),

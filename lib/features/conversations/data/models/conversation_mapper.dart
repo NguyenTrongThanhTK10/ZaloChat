@@ -13,7 +13,9 @@ Conversation conversationFromJson(Object? source) {
     unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
     lastReadSequence: (json['lastReadSequence'] as num?)?.toInt() ?? 0,
     peerLastReadSequence: (json['peerLastReadSequence'] as num?)?.toInt() ?? 0,
-    lastMessagePreview: lastMessage?['text'] as String?,
+    lastMessagePreview: lastMessage?['kind'] == 'voice'
+        ? '🎤 Tin nhắn thoại'
+        : lastMessage?['text'] as String?,
     lastMessageAt: lastMessage?['createdAt'] is String
         ? DateTime.parse(lastMessage!['createdAt'] as String).toLocal()
         : null,

@@ -1,4 +1,5 @@
 import '../entities/auth_session.dart';
+import '../entities/chat_user.dart';
 
 abstract class AuthRepository {
   Future<AuthSession?> restore();
@@ -9,4 +10,5 @@ abstract class AuthRepository {
     String password,
   );
   Future<void> logout();
+  Future<ChatUser> updateProfile(String displayName, String email);
 }
