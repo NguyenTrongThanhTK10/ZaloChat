@@ -16,7 +16,7 @@ from uuid import uuid4
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DLL = ROOT / "src/Chat.Api/bin/Debug/net10.0/Chat.Api.dll"
+DLL = ROOT / "src/Chat.Api/bin/Debug/net8.0/Chat.Api.dll"
 
 
 def free_port():

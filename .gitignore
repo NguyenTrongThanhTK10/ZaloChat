@@ -34,6 +34,8 @@ migrate_working_dir/
 /coverage/
 
 # Local ASP.NET build artifacts and development data
+/backend/.vs/
+/backend/.dotnet-cli/
 /backend/**/bin/
 /backend/**/obj/
 /backend/src/Chat.Api/data/

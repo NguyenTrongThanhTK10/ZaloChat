@@ -1,12 +1,30 @@
 # Chat API (local MVP)
 
-ASP.NET Core 10 API for one-to-one text and voice chat. This is a runnable MVP for two or more locally registered accounts. It does not create sample accounts or messages.
+ASP.NET Core 8 API for one-to-one text and voice chat. This is a runnable MVP for two or more locally registered accounts. It does not create sample accounts or messages.
+
+## Chạy bằng Visual Studio trên Windows
+
+1. Mở `backend/ZaloChat.sln` bằng Visual Studio 2022 có workload **ASP.NET and web development** và .NET 8 SDK.
+2. Nếu cần, nhấn chuột phải vào **Chat.Api** → **Set as Startup Project**.
+3. Chọn profile **Chat.Api**, nhấn **F5** (debug) hoặc **Ctrl+F5** (chạy).
+4. Trình duyệt mở `http://localhost:5080/health` và trả về `{"status":"ok"}`. Hợp đồng API tại `http://localhost:5080/openapi/v1.json`.
+
+Profile đã thiết lập môi trường Development; khóa ký và dữ liệu sẽ được tạo tự động trong thư mục `src/Chat.Api/data`. Không cần cài SQL Server cho bản backend hiện tại.
+
+Chạy và build bằng PowerShell từ thư mục gốc dự án:
+
+```powershell
+dotnet build .\backend\ZaloChat.sln
+dotnet run --project .\backend\src\Chat.Api --launch-profile Chat.Api
+```
+
+Flutter Android Emulator dùng `http://10.0.2.2:5080`; Flutter Windows dùng `http://localhost:5080`. Dừng backend đang chạy trước khi mở một phiên khác vì mỗi tệp dữ liệu chỉ cho phép một tiến trình truy cập.
 
 ## Run
 
 ```sh
 cd backend/src/Chat.Api
-ASPNETCORE_ENVIRONMENT=Development dotnet run --urls http://127.0.0.1:5080
+dotnet run --launch-profile Chat.Api
 ```
 
 The default data file is `backend/src/Chat.Api/data/chat-state.json`. Set `Chat__DataPath` to use another path. In Development, the server generates a signing key in the same data directory. In any other environment, set a secret of at least 32 bytes with `Chat__SigningKey`; the server refuses to start without it. HTTPS is required when deployed beyond localhost. The file store is intended for a single server process; use a transactional database and shared SignalR backplane before scaling horizontally.

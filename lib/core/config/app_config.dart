@@ -7,7 +7,8 @@ abstract final class AppConfig {
       return configured.replaceFirst(RegExp(r'/+$'), '');
     }
     if (kDebugMode && defaultTargetPlatform == TargetPlatform.android) {
-      return 'http://10.0.2.2:5080';
+      //return 'http://10.0.2.2:5080';
+      return 'http://192.168.1.6:45457';
     }
     return 'http://localhost:5080';
   }

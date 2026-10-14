@@ -14,7 +14,7 @@ Nhận dạng dùng dịch vụ của Android/iOS qua [`speech_to_text`](https:/
 
    ```sh
    cd backend/src/Chat.Api
-   ASPNETCORE_ENVIRONMENT=Development dotnet run --urls http://127.0.0.1:5080
+   dotnet run --launch-profile Chat.Api
    ```
 
 2. Ở terminal khác, chạy Flutter. Tạo hai tài khoản trong ứng dụng để thử nhắn tin; backend không tạo dữ liệu mẫu.
