@@ -18,7 +18,7 @@ dotnet build .\backend\ZaloChat.sln
 dotnet run --project .\backend\src\Chat.Api --launch-profile Chat.Api
 ```
 
-Flutter Android Emulator dùng `http://10.0.2.2:5080`; Flutter Windows dùng `http://localhost:5080`. Dừng backend đang chạy trước khi mở một phiên khác vì mỗi tệp dữ liệu chỉ cho phép một tiến trình truy cập.
+Profile `Chat.Api` lắng nghe trên mọi giao diện mạng tại cổng 5080. Flutter Android Emulator dùng `http://10.0.2.2:5080`; điện thoại thật dùng `http://<IP-LAN-của-máy-chạy-API>:5080`; Flutter Windows dùng `http://localhost:5080`. Chỉ cần sửa `AppConfig.apiBaseUrl` trong `lib/core/config/app_config.dart`. Dừng backend đang chạy trước khi mở một phiên khác vì mỗi tệp dữ liệu chỉ cho phép một tiến trình truy cập.
 
 ## Run
 
@@ -31,7 +31,7 @@ The default data file is `backend/src/Chat.Api/data/chat-state.json`. Set `Chat_
 
 No third-party NuGet packages are required. Run `python3 backend/tests/smoke.py` from the repository root after building to exercise auth, message ordering, retries, read receipts, access control, refresh rotation, live SignalR delivery, and persistence across restart.
 
-For physical device testing, bind the server to a reachable interface (for example `--urls http://0.0.0.0:5080`) and point the mobile client at the host's LAN address. Use a trusted development network; deploy with HTTPS before using non-test credentials.
+The `Chat.Api` launch profile binds to `http://0.0.0.0:5080` for physical device testing. Point the mobile client at the host's LAN address and allow port 5080 through the host firewall. Use a trusted development network; deploy with HTTPS before using non-test credentials.
 
 The OpenAPI 3.1 contract is available at `/openapi/v1.json` while the server runs and in [`src/Chat.Api/openapi.json`](src/Chat.Api/openapi.json). Auth endpoints are limited to 20 requests per minute per IP; message sends are limited to 60 per minute per account.
 
@@ -55,9 +55,12 @@ All IDs are UUID strings. Times are UTC ISO 8601 strings. Protected endpoints re
 | GET | `/api/messages/{id}/audio` | none | `audio/mp4`; only conversation members may download |
 | PUT | `/api/messages/{id}/heart` | none | 200 `Message`; adds the caller's heart, idempotent |
 | DELETE | `/api/messages/{id}/heart` | none | 200 `Message`; removes the caller's heart, idempotent |
+| PUT | `/api/messages/{id}/reaction` | `{type}`: `heart`, `like`, `laugh`, `wow`, `sad`, or `angry` | 200 `Message`; sets or replaces the caller's reaction |
+| DELETE | `/api/messages/{id}/reaction` | none | 200 `Message`; removes the caller's reaction |
 | POST | `/api/conversations/{id}/read` | `{throughSequence}` | `{lastReadSequence}`; cursor advances monotonically |
+| POST | `/api/conversations/{id}/delivered` | `{throughSequence}` | `{lastDeliveredSequence}`; cursor advances monotonically |
 
-`User`: `{id,displayName,email}`. `Message`: `{id,clientMessageId,conversationId,senderId,text,kind,voiceDurationMs,sequence,createdAt,heartedBy,replyTo}`; `kind` is `text` or `voice`; `voiceDurationMs` is null for text messages. `heartedBy` contains the IDs of users who hearted the message. `Conversation`: `{id,peer:User,lastMessage:Message?,unreadCount,lastReadSequence,peerLastReadSequence}`. Both read sequence fields are scoped to the current conversation: `lastReadSequence` belongs to the authenticated user; `peerLastReadSequence` belongs to the peer. `nextCursor` is null at the end of history. A message with `sequence < beforeSequence` is returned on the next page, so clients avoid duplicate boundary items.
+`User`: `{id,displayName,email}`. `Message`: `{id,clientMessageId,conversationId,senderId,text,kind,voiceDurationMs,sequence,createdAt,heartedBy,reactions,replyTo}`; `kind` is `text` or `voice`; `voiceDurationMs` is null for text messages. `reactions` maps user IDs to reaction types, with one reaction per user per message. `heartedBy` remains for compatibility and contains only users whose current reaction is `heart`. `Conversation`: `{id,peer:User,lastMessage:Message?,unreadCount,lastReadSequence,peerLastReadSequence,lastDeliveredSequence,peerLastDeliveredSequence}`. The `last*` cursors belong to the authenticated user; `peerLast*` cursors belong to the peer. Delivery means the recipient app has stored the message; read means the recipient opened the conversation. A read cursor also advances delivery. `nextCursor` is null at the end of history. A message with `sequence < beforeSequence` is returned on the next page, so clients avoid duplicate boundary items.
 
 For example, register two accounts, create a conversation with the other user's ID, then send:
 
@@ -75,6 +78,7 @@ Connect to `/hubs/chat` using the access token in the `Authorization` header. Si
 - `MessageUpdated(Message)` when a heart is added or removed.
 - `ConversationUpdated(Conversation)` with each recipient's own unread/read fields.
 - `MessageRead({conversationId,userId,lastReadSequence})` after a read cursor advances.
+- `MessageDelivered({conversationId,userId,lastDeliveredSequence})` after a delivery cursor advances.
 
 On reconnect, fetch `/api/conversations/{id}/messages` with cursor pagination and reconcile by message ID or `clientMessageId`. Concurrent writes can make events arrive out of order; sort messages by `sequence`. SignalR is an update channel; REST is the source of truth.
 

@@ -161,7 +161,7 @@ class _AuthPageState extends ConsumerState<AuthPage> {
               const SizedBox(height: AppSpacing.sm),
               Text(
                 widget.register
-                    ? 'Bắt đầu những cuộc trò chuyện ý nghĩa cùng Lối Chat.'
+                    ? 'Bắt đầu những cuộc trò chuyện ý nghĩa cùng Lumi Chat.'
                     : 'Đăng nhập để tiếp tục trò chuyện\ncùng những người bạn yêu quý.',
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: scheme.onSurfaceVariant,

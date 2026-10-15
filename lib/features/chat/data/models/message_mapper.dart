@@ -18,8 +18,25 @@ ChatMessage messageFromJson(Object? source) {
     sequence: (json['sequence'] as num).toInt(),
     createdAt: DateTime.parse(json['createdAt'] as String).toLocal(),
     status: MessageStatus.sent,
+    isRecalled: json['isRecalled'] == true,
     heartedBy: (json['heartedBy'] as List? ?? const [])
         .map((id) => id.toString())
         .toList(growable: false),
+    reactions: (json['reactions'] as Map? ?? const {}).map(
+      (userId, reaction) => MapEntry(
+        userId.toString(),
+        MessageReaction.values.byName(reaction.toString()),
+      ),
+    ),
+    reactionSets: (json['reactionSets'] as Map? ?? const {}).map(
+      (userId, reactions) => MapEntry(
+        userId.toString(),
+        (reactions as List)
+            .map(
+              (reaction) => MessageReaction.values.byName(reaction.toString()),
+            )
+            .toList(growable: false),
+      ),
+    ),
   );
 }

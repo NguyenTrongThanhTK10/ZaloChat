@@ -1,20 +1,26 @@
 {
-  "version": "0.2.0",
-  "configurations": [
-    {
-      "name": "Flutter: Android thật (USB)",
-      "request": "launch",
-      "type": "dart",
-      "program": "lib/main.dart",
-      "preLaunchTask": "Android: forward backend port",
-      "toolArgs": ["--dart-define=API_BASE_URL=http://127.0.0.1:5080"]
-    },
-    {
-      "name": "Flutter: Android Emulator",
-      "request": "launch",
-      "type": "dart",
-      "program": "lib/main.dart",
-      "toolArgs": ["--dart-define=API_BASE_URL=http://10.0.2.2:5080"]
-    }
-  ]
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+    
+        {
+            "name": "ZaloChat",
+            "request": "launch",
+            "type": "dart"
+        },
+        {
+            "name": "ZaloChat (profile mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "profile"
+        },
+        {
+            "name": "ZaloChat (release mode)",
+            "request": "launch",
+            "type": "dart",
+            "flutterMode": "release"
+        }
+    ]
 }

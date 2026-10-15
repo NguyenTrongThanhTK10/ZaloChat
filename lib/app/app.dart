@@ -8,6 +8,7 @@ import '../features/auth/presentation/providers/auth_providers.dart';
 import '../features/chat/presentation/pages/chat_page.dart';
 import '../features/chat/presentation/providers/message_providers.dart';
 import '../features/conversations/presentation/pages/conversations_page.dart';
+import '../features/conversations/presentation/providers/conversation_providers.dart';
 import '../features/contacts/presentation/pages/people_page.dart';
 import '../features/contacts/presentation/pages/person_detail_page.dart';
 import '../features/profile/presentation/pages/profile_page.dart';
@@ -77,7 +78,7 @@ class ChatApp extends ConsumerWidget {
     final auth = ref.watch(authProvider);
     if (auth.isLoading) {
       return MaterialApp(
-        title: 'Lối Chat',
+        title: 'Lumi Chat',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.light,
         darkTheme: AppTheme.dark,
@@ -86,8 +87,9 @@ class ChatApp extends ConsumerWidget {
       );
     }
     ref.watch(outboxSyncProvider);
+    ref.watch(conversationListProvider);
     return MaterialApp.router(
-      title: 'Lối Chat',
+      title: 'Lumi Chat',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.light,
       darkTheme: AppTheme.dark,

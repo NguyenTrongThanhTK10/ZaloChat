@@ -7,4 +7,5 @@ abstract class ConversationRepository {
   Future<List<ChatUser>> searchUsers(String query);
   Future<Conversation> start(String peerUserId);
   Future<int> markRead(String conversationId, int throughSequence);
+  Future<int> markDelivered(String conversationId, int throughSequence);
 }

@@ -25,6 +25,7 @@ internal static class ChatQueries
 
         return new ConversationDto(conversation.Id, UserDto.From(peer),
             lastMessage is null ? null : MessageDto.From(lastMessage), unreadCount,
-            lastRead, conversation.ReadSequence(peer.Id));
+            lastRead, conversation.ReadSequence(peer.Id),
+            conversation.DeliveredSequence(userId), conversation.DeliveredSequence(peer.Id));
     }
 }

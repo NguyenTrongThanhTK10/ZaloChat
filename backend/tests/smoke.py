@@ -29,6 +29,7 @@ class SignalRSocket:
     """Small WebSocket client for one SignalR JSON protocol event assertion."""
 
     def __init__(self, port, connection_token, access_token):
+        self.pending_records = []
         self.socket = socket.create_connection(("127.0.0.1", port), timeout=5)
         key = base64.b64encode(os.urandom(16)).decode()
         path = f"/hubs/chat?id={quote(connection_token)}&access_token={quote(access_token)}"
@@ -74,6 +75,8 @@ class SignalRSocket:
 
     def next_record(self):
         while True:
+            if self.pending_records:
+                return self.pending_records.pop(0)
             first, second = self.receive_exact(2)
             opcode = first & 0x0F
             length = second & 0x7F
@@ -86,7 +89,9 @@ class SignalRSocket:
                 raise ConnectionError("WebSocket closed by server")
             if opcode != 1:
                 continue
-            return json.loads(payload.decode().rstrip("\x1e"))
+            self.pending_records.extend(
+                json.loads(record) for record in payload.decode().split("\x1e") if record
+            )
 
 
 class ChatApiSmokeTest(unittest.TestCase):
@@ -306,6 +311,78 @@ class ChatApiSmokeTest(unittest.TestCase):
         with urlopen(request, timeout=5) as response:
             self.assertEqual(response.read(), audio)
 
+        status, recalled = self.request("PUT", f"/api/messages/{voice['id']}/recall", token=a)
+        self.assertEqual(status, 200)
+        self.assertTrue(recalled["isRecalled"])
+        self.assertIsNone(recalled["voiceDurationMs"])
+        self.assertEqual(self.request("GET", audio_path, token=b)[0], 404)
+        updated_reply = self.request("GET", f"/api/conversations/{cid}/messages", token=b)[1]["items"][0]
+        self.assertEqual(updated_reply["replyTo"]["text"], "Tin nhắn đã thu hồi")
+
+    def test_recall_message_authorization_realtime_and_persistence(self):
+        suffix = uuid4().hex[:8]
+        _, alice = self.request("POST", "/api/auth/register", {
+            "displayName": "Alice", "email": f"recall-a-{suffix}@example.com",
+            "password": "alice-pass-123",
+        })
+        _, bob = self.request("POST", "/api/auth/register", {
+            "displayName": "Bob", "email": f"recall-b-{suffix}@example.com",
+            "password": "bob-pass-123",
+        })
+        _, outsider = self.request("POST", "/api/auth/register", {
+            "displayName": "Outsider", "email": f"recall-c-{suffix}@example.com",
+            "password": "outsider-pass-123",
+        })
+        a, b, c = (user["accessToken"] for user in (alice, bob, outsider))
+        cid = self.request("POST", "/api/conversations", {
+            "peerUserId": bob["user"]["id"],
+        }, a)[1]["id"]
+        _, first = self.request("POST", f"/api/conversations/{cid}/messages", {
+            "clientMessageId": str(uuid4()), "text": "Secret message",
+        }, a)
+        _, reply = self.request("POST", f"/api/conversations/{cid}/messages", {
+            "clientMessageId": str(uuid4()), "text": "I saw it",
+            "replyToMessageId": first["id"],
+        }, b)
+        path = f"/api/messages/{first['id']}/recall"
+        self.assertEqual(self.request("PUT", path)[0], 401)
+        self.assertEqual(self.request("PUT", path, token=c)[0], 404)
+        self.assertEqual(self.request("PUT", path, token=b)[0], 403)
+        negotiation = self.request("POST", "/hubs/chat/negotiate?negotiateVersion=1", token=b)[1]
+        realtime = SignalRSocket(self.port, negotiation["connectionToken"], b)
+        try:
+            time.sleep(0.1)
+            status, recalled = self.request("PUT", path, token=a)
+            self.assertEqual(status, 200)
+            self.assertTrue(recalled["isRecalled"])
+            self.assertEqual(recalled["text"], "")
+            self.assertEqual(recalled["reactions"], {})
+            event = realtime.next_record()
+            self.assertEqual(event["target"], "MessageUpdated")
+            self.assertEqual(event["arguments"][0]["id"], first["id"])
+            self.assertTrue(event["arguments"][0]["isRecalled"])
+            reply_event = realtime.next_record()
+            self.assertEqual(reply_event["target"], "MessageUpdated")
+            self.assertEqual(reply_event["arguments"][0]["id"], reply["id"])
+            self.assertEqual(reply_event["arguments"][0]["replyTo"]["text"], "Tin nhắn đã thu hồi")
+        finally:
+            realtime.close()
+        self.assertEqual(self.request("PUT", path, token=a)[1], recalled)
+        page = self.request("GET", f"/api/conversations/{cid}/messages", token=b)[1]
+        self.assertEqual(page["items"][1]["text"], "")
+        self.assertTrue(page["items"][1]["isRecalled"])
+        self.assertEqual(page["items"][0]["replyTo"]["text"], "Tin nhắn đã thu hồi")
+        self.assertEqual(self.request("PUT", f"/api/messages/{first['id']}/heart", token=b)[0], 400)
+        self.assertEqual(self.request("POST", f"/api/conversations/{cid}/messages", {
+            "clientMessageId": str(uuid4()), "text": "another reply",
+            "replyToMessageId": first["id"],
+        }, b)[0], 400)
+        self.stop_server()
+        self.start_server()
+        persisted = self.request("GET", f"/api/conversations/{cid}/messages", token=b)[1]
+        self.assertTrue(persisted["items"][1]["isRecalled"])
+        self.assertEqual(persisted["items"][1]["text"], "")
+
     def test_two_account_chat_and_restart(self):
         suffix = uuid4().hex[:8]
         _, alice = self.request("POST", "/api/auth/register", {
@@ -375,6 +452,51 @@ class ChatApiSmokeTest(unittest.TestCase):
             self.assertEqual(len(self.request("PUT", heart_path, token=a)[1]["heartedBy"]), 2)
             self.assertEqual(self.request("DELETE", heart_path, token=b)[1]["heartedBy"], [alice["user"]["id"]])
             self.assertEqual(self.request("DELETE", heart_path, token=b)[1]["heartedBy"], [alice["user"]["id"]])
+            reaction_path = f"/api/messages/{first['id']}/reaction"
+            self.assertEqual(self.request("PUT", reaction_path, {"type": "like"}, outsider)[0], 404)
+            self.assertEqual(self.request("PUT", reaction_path, {"type": "invalid"}, b)[0], 400)
+            liked = self.request("PUT", reaction_path, {"type": "like"}, b)[1]
+            self.assertEqual(liked["reactions"], {
+                alice["user"]["id"]: "heart", bob["user"]["id"]: "like",
+            })
+            self.assertEqual(liked["heartedBy"], [alice["user"]["id"]])
+            self.assertEqual(liked["reactionSets"][bob["user"]["id"]], ["like"])
+            self.assertEqual(self.request("PUT", reaction_path, {"type": "like"}, b)[1]["reactions"], liked["reactions"])
+            wow = self.request("PUT", reaction_path, {"type": "wow"}, b)[1]
+            self.assertEqual(wow["reactionSets"][bob["user"]["id"]], ["like", "wow"])
+            after_wow = self.request("DELETE", reaction_path + "/wow", token=b)[1]
+            self.assertEqual(after_wow["reactionSets"][bob["user"]["id"]], ["like"])
+            self.assertNotIn(bob["user"]["id"], self.request("DELETE", reaction_path, token=b)[1]["reactions"])
+            self.assertEqual(self.request("PUT", reaction_path, {"type": "angry"}, b)[1]["reactions"][bob["user"]["id"]], "angry")
+            own_laugh = self.request("PUT", reaction_path, {"type": "laugh"}, a)[1]
+            self.assertEqual(own_laugh["reactionSets"][alice["user"]["id"]], ["heart", "laugh"])
+            own_without_heart = self.request("DELETE", reaction_path + "/heart", token=a)[1]
+            self.assertEqual(own_without_heart["reactionSets"][alice["user"]["id"]], ["laugh"])
+            self.request("PUT", reaction_path, {"type": "heart"}, a)
+            delivered_path = f"/api/conversations/{cid}/delivered"
+            self.assertEqual(self.request("POST", delivered_path, {
+                "throughSequence": 1,
+            }, outsider)[0], 404)
+            self.assertEqual(self.request("POST", delivered_path, {
+                "throughSequence": -1,
+            }, b)[0], 400)
+            self.assertEqual(self.request("POST", delivered_path, {
+                "throughSequence": 1,
+            }, b)[1]["lastDeliveredSequence"], 1)
+            delivered_event = realtime.next_record()
+            while delivered_event.get("target") != "MessageDelivered":
+                delivered_event = realtime.next_record()
+            self.assertEqual(delivered_event["arguments"][0], {
+                "conversationId": cid,
+                "userId": bob["user"]["id"],
+                "lastDeliveredSequence": 1,
+            })
+            self.assertEqual(self.request("POST", delivered_path, {
+                "throughSequence": 0,
+            }, b)[1]["lastDeliveredSequence"], 1)
+            alice_conversation = self.request("GET", "/api/conversations", token=a)[1][0]
+            self.assertEqual(alice_conversation["peerLastDeliveredSequence"], 1)
+            self.assertEqual(alice_conversation["peerLastReadSequence"], 0)
         finally:
             realtime.close()
         self.assertEqual(status, 201)
@@ -405,6 +527,7 @@ class ChatApiSmokeTest(unittest.TestCase):
         }, a)[1]["lastReadSequence"], 2)
         self.assertEqual(self.request("GET", "/api/conversations", token=a)[1][0]["unreadCount"], 0)
         self.assertEqual(self.request("GET", "/api/conversations", token=b)[1][0]["peerLastReadSequence"], 2)
+        self.assertEqual(self.request("GET", "/api/conversations", token=b)[1][0]["peerLastDeliveredSequence"], 2)
 
         status, rotated = self.request("POST", "/api/auth/refresh", {
             "refreshToken": alice["refreshToken"],
@@ -426,6 +549,7 @@ class ChatApiSmokeTest(unittest.TestCase):
         self.assertEqual([item["sequence"] for item in history["items"]], [2, 1])
         self.assertEqual(history["items"][1]["text"], "Xin chào! 🥰")
         self.assertEqual(history["items"][1]["heartedBy"], [alice["user"]["id"]])
+        self.assertEqual(history["items"][1]["reactions"][bob["user"]["id"]], "angry")
 
 
 if __name__ == "__main__":

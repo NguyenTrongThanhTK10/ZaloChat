@@ -4,9 +4,8 @@
     "Chat.Api": {
       "commandName": "Project",
       "dotnetRunMessages": true,
-      "launchBrowser": true,
-      "launchUrl": "health",
-      "applicationUrl": "http://localhost:5080",
+      "launchBrowser": false,
+      "applicationUrl": "http://0.0.0.0:5080",
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development",
         "DOTNET_ENVIRONMENT": "Development"

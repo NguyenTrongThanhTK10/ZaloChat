@@ -14,6 +14,8 @@ class Conversation {
     this.lastMessageAt,
     this.lastReadSequence = 0,
     this.peerLastReadSequence = 0,
+    this.lastDeliveredSequence = 0,
+    this.peerLastDeliveredSequence = 0,
   });
 
   final String id;
@@ -30,6 +32,8 @@ class Conversation {
   final DateTime? lastMessageAt;
   final int lastReadSequence;
   final int peerLastReadSequence;
+  final int lastDeliveredSequence;
+  final int peerLastDeliveredSequence;
 
   Conversation copyWith({
     int? unreadCount,
@@ -37,6 +41,8 @@ class Conversation {
     DateTime? lastMessageAt,
     int? lastReadSequence,
     int? peerLastReadSequence,
+    int? lastDeliveredSequence,
+    int? peerLastDeliveredSequence,
   }) {
     return Conversation(
       id: id,
@@ -53,6 +59,10 @@ class Conversation {
       lastMessageAt: lastMessageAt ?? this.lastMessageAt,
       lastReadSequence: lastReadSequence ?? this.lastReadSequence,
       peerLastReadSequence: peerLastReadSequence ?? this.peerLastReadSequence,
+      lastDeliveredSequence:
+          lastDeliveredSequence ?? this.lastDeliveredSequence,
+      peerLastDeliveredSequence:
+          peerLastDeliveredSequence ?? this.peerLastDeliveredSequence,
     );
   }
 }

@@ -60,7 +60,7 @@ class AuthBrandPanel extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        'Lối Chat',
+                        'Lumi Chat',
                         style: theme.textTheme.titleLarge?.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w800,

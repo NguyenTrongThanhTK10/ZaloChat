@@ -42,6 +42,7 @@ ChatMessage _message({
   required String text,
   MessageStatus status = MessageStatus.sent,
   MessageReply? replyTo,
+  List<String> heartedBy = const [],
 }) => ChatMessage(
   id: id,
   clientMessageId: clientMessageId,
@@ -52,6 +53,7 @@ ChatMessage _message({
   createdAt: DateTime.utc(2026, 10, 13, 12, 0, sequence),
   status: status,
   replyTo: replyTo,
+  heartedBy: heartedBy,
 );
 
 class _SendAttempt {
@@ -123,6 +125,54 @@ class _MessageRepository implements MessageRepository {
   }
 
   @override
+  Future<ChatMessage> setReaction(
+    String messageId,
+    MessageReaction reaction, {
+    required bool selected,
+  }) async {
+    final message = messages.singleWhere((item) => item.id == messageId);
+    final reactionSets = message.effectiveReactionSets;
+    final mine = [...reactionSets['alice'] ?? const <MessageReaction>[]];
+    if (selected) {
+      if (!mine.contains(reaction)) mine.add(reaction);
+    } else {
+      mine.remove(reaction);
+    }
+    if (mine.isEmpty) {
+      reactionSets.remove('alice');
+    } else {
+      reactionSets['alice'] = mine;
+    }
+    final updated = message.copyWith(
+      heartedBy: [
+        for (final entry in reactionSets.entries)
+          if (entry.value.contains(MessageReaction.heart)) entry.key,
+      ],
+      reactions: const {},
+      reactionSets: reactionSets,
+    );
+    messages[messages.indexOf(message)] = updated;
+    return updated;
+  }
+
+  @override
+  Future<ChatMessage> recall(String messageId) async {
+    final message = messages.singleWhere((item) => item.id == messageId);
+    return ChatMessage(
+      id: message.id,
+      clientMessageId: message.clientMessageId,
+      conversationId: message.conversationId,
+      senderId: message.senderId,
+      text: '',
+      sequence: message.sequence,
+      createdAt: message.createdAt,
+      status: message.status,
+      kind: message.kind,
+      isRecalled: true,
+    );
+  }
+
+  @override
   Future<ChatMessage> sendVoice(
     String conversationId,
     String clientMessageId,
@@ -148,6 +198,10 @@ class _MessageRepository implements MessageRepository {
 
 class _ConversationRepository implements ConversationRepository {
   @override
+  Future<int> markDelivered(String conversationId, int throughSequence) async =>
+      throughSequence;
+
+  @override
   Future<ChatUser> getUser(String userId) async =>
       ChatUser(id: userId, displayName: 'Bob', email: 'bob@example.com');
 
@@ -169,6 +223,7 @@ class _ReadAwareStore extends ChatLocalStore {
   _ReadAwareStore() : super(executor: NativeDatabase.memory());
 
   final readPersisted = Completer<void>();
+  final deliveredPersisted = Completer<void>();
 
   @override
   Future<void> upsertMessages(
@@ -176,6 +231,10 @@ class _ReadAwareStore extends ChatLocalStore {
     Iterable<ChatMessage> messages,
   ) async {
     await super.upsertMessages(accountId, messages);
+    if (messages.any((message) => message.status == MessageStatus.delivered) &&
+        !deliveredPersisted.isCompleted) {
+      deliveredPersisted.complete();
+    }
     if (messages.any((message) => message.status == MessageStatus.read) &&
         !readPersisted.isCompleted) {
       readPersisted.complete();
@@ -388,7 +447,7 @@ void main() {
       final original = find.byKey(const ValueKey('message-original'));
       await tester.longPress(original);
       await tester.pumpAndSettle();
-      expect(find.text('Thả tim'), findsOneWidget);
+      expect(find.byKey(const ValueKey('reaction-heart')), findsOneWidget);
       expect(find.text('Trả lời'), findsOneWidget);
       await tester.tap(find.text('Sao chép'));
       await tester.pumpAndSettle();
@@ -426,6 +485,76 @@ void main() {
       await store.close();
     }
   });
+
+  testWidgets(
+    'sender can recall a message and its cached bubble stays recalled',
+    (tester) async {
+      final store = ChatLocalStore(executor: NativeDatabase.memory());
+      final repository = _MessageRepository(
+        messages: [
+          _message(
+            id: 'mine',
+            clientMessageId: 'mine-client',
+            senderId: 'alice',
+            sequence: 1,
+            text: 'Private text',
+          ),
+          _message(
+            id: 'theirs',
+            clientMessageId: 'theirs-client',
+            senderId: 'bob',
+            sequence: 2,
+            text: 'Bob text',
+          ),
+        ],
+      );
+      final container = ProviderContainer(
+        overrides: [
+          currentUserProvider.overrideWithValue(_account),
+          realtimeServiceProvider.overrideWithValue(null),
+          chatLocalStoreProvider.overrideWithValue(store),
+          messageRepositoryProvider.overrideWithValue(repository),
+          conversationRepositoryProvider.overrideWithValue(
+            _ConversationRepository(),
+          ),
+        ],
+      );
+      try {
+        await container.read(conversationDetailProvider('chat').future);
+        await container.read(messagesProvider('chat').future);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: ChatPage(conversationId: 'chat')),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.longPress(find.byKey(const ValueKey('message-theirs')));
+        await tester.pumpAndSettle();
+        expect(find.text('Thu hồi tin nhắn'), findsNothing);
+        await tester.tapAt(const Offset(10, 10));
+        await tester.pumpAndSettle();
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thu hồi tin nhắn'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thu hồi').last);
+        await tester.pumpAndSettle();
+        expect(find.text('Private text'), findsNothing);
+        expect(find.text('Tin nhắn đã thu hồi'), findsOneWidget);
+        final cached = await store.loadMessages('alice', 'chat');
+        expect(cached.first.isRecalled, isTrue);
+        expect(cached.first.text, isEmpty);
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        expect(find.text('Thu hồi tin nhắn'), findsNothing);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        container.dispose();
+        await store.close();
+      }
+    },
+  );
 
   test('sending voice stores a playable message in the cache', () async {
     final store = ChatLocalStore(executor: NativeDatabase.memory());
@@ -729,7 +858,7 @@ void main() {
   });
 
   test(
-    'peer read sequence updates outgoing status and cached message',
+    'peer delivery and read cursors advance outgoing status and cache',
     () async {
       final store = _ReadAwareStore();
       final messages = _MessageRepository(
@@ -764,6 +893,21 @@ void main() {
         expect(
           (await store.loadMessages('alice', 'chat')).single.status,
           MessageStatus.sent,
+        );
+
+        container
+            .read(conversationListProvider.notifier)
+            .upsert(_conversation.copyWith(peerLastDeliveredSequence: 12));
+        expect(
+          container.read(messagesProvider('chat')).requireValue.single.status,
+          MessageStatus.delivered,
+        );
+        await store.deliveredPersisted.future.timeout(
+          const Duration(seconds: 2),
+        );
+        expect(
+          (await store.loadMessages('alice', 'chat')).single.status,
+          MessageStatus.delivered,
         );
 
         container
@@ -904,7 +1048,7 @@ void main() {
 
       await tester.longPress(find.byKey(const ValueKey('message-incoming-1')));
       await tester.pumpAndSettle();
-      await tester.tap(find.text('Thả tim'));
+      await tester.tap(find.byKey(const ValueKey('reaction-heart')));
       await tester.pumpAndSettle();
       expect(
         container
@@ -914,7 +1058,7 @@ void main() {
             .heartedBy,
         ['alice'],
       );
-      expect(find.byTooltip('Bỏ tim'), findsOneWidget);
+      expect(find.byTooltip('Đổi cảm xúc'), findsOneWidget);
 
       await tester.tap(find.byTooltip('Chọn biểu tượng cảm xúc'));
       await tester.pumpAndSettle();
@@ -941,9 +1085,188 @@ void main() {
       await store.close();
     }
   });
+
+  testWidgets(
+    'reactions show distinct icons and a total at the bubble corner',
+    (tester) async {
+      final store = ChatLocalStore(executor: NativeDatabase.memory());
+      final repository = _MessageRepository(
+        messages: [
+          _message(
+            id: 'mine',
+            clientMessageId: 'mine',
+            senderId: 'alice',
+            sequence: 1,
+            text: 'Chào bạn',
+            heartedBy: ['alice', 'bob'],
+          ),
+          _message(
+            id: 'theirs',
+            clientMessageId: 'theirs',
+            senderId: 'bob',
+            sequence: 2,
+            text: 'Chào',
+            heartedBy: ['bob'],
+          ),
+        ],
+      );
+      final container = ProviderContainer(
+        overrides: [
+          currentUserProvider.overrideWithValue(_account),
+          realtimeServiceProvider.overrideWithValue(null),
+          chatLocalStoreProvider.overrideWithValue(store),
+          messageRepositoryProvider.overrideWithValue(repository),
+          conversationRepositoryProvider.overrideWithValue(
+            _ConversationRepository(),
+          ),
+        ],
+      );
+      try {
+        await container.read(conversationDetailProvider('chat').future);
+        await container.read(messagesProvider('chat').future);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: ChatPage(conversationId: 'chat')),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        for (final (messageId, count) in [('mine', 2), ('theirs', 1)]) {
+          final badge = find.byKey(ValueKey('message-hearts-$messageId'));
+          final icons = find.descendant(
+            of: badge,
+            matching: find.byIcon(Icons.favorite_rounded),
+          );
+          expect(icons, findsOneWidget);
+          if (count > 1) {
+            expect(
+              find.descendant(of: badge, matching: find.text('$count')),
+              findsOneWidget,
+            );
+          }
+          for (final icon in tester.widgetList<Icon>(icons)) {
+            expect(icon.color, const Color(0xFFE53935));
+          }
+
+          final bubbleRect = tester.getRect(
+            find.byKey(ValueKey('message-$messageId')),
+          );
+          final badgeRect = tester.getRect(badge);
+          expect(badgeRect.right, lessThanOrEqualTo(bubbleRect.right));
+          expect(badgeRect.right, greaterThan(bubbleRect.right - 16));
+          expect(badgeRect.top, lessThan(bubbleRect.bottom));
+          expect(badgeRect.bottom, greaterThan(bubbleRect.bottom));
+        }
+
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        final reactionButtons = [
+          for (final reaction in MessageReaction.values)
+            find.byKey(ValueKey('reaction-${reaction.name}')),
+        ];
+        for (final button in reactionButtons) {
+          expect(button, findsOneWidget);
+          expect(
+            tester.getCenter(button).dy,
+            tester.getCenter(reactionButtons.first).dy,
+          );
+        }
+        await tester.tap(find.byKey(const ValueKey('reaction-like')));
+        await tester.pumpAndSettle();
+        final updated = container
+            .read(messagesProvider('chat'))
+            .requireValue
+            .singleWhere((message) => message.id == 'mine');
+        expect(
+          updated.effectiveReactionSets['alice'],
+          containsAll([MessageReaction.heart, MessageReaction.like]),
+        );
+        expect(updated.effectiveReactions['bob'], MessageReaction.heart);
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-hearts-mine')),
+            matching: find.text('👍'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const ValueKey('message-hearts-mine')),
+            matching: find.text('3'),
+          ),
+          findsOneWidget,
+        );
+        final mineBadge = find.byKey(const ValueKey('message-hearts-mine'));
+        final heartIcon = find.descendant(
+          of: mineBadge,
+          matching: find.byIcon(Icons.favorite_rounded),
+        );
+        final likeIcon = find.descendant(
+          of: mineBadge,
+          matching: find.text('👍'),
+        );
+        expect(
+          tester.getTopLeft(likeIcon).dx - tester.getTopRight(heartIcon).dx,
+          lessThanOrEqualTo(4),
+        );
+
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('reaction-laugh')));
+        await tester.pumpAndSettle();
+        expect(
+          container
+              .read(messagesProvider('chat'))
+              .requireValue
+              .singleWhere((message) => message.id == 'mine')
+              .effectiveReactionSets['alice'],
+          containsAll([
+            MessageReaction.heart,
+            MessageReaction.like,
+            MessageReaction.laugh,
+          ]),
+        );
+
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('reaction-like')));
+        await tester.pumpAndSettle();
+        expect(
+          container
+              .read(messagesProvider('chat'))
+              .requireValue
+              .singleWhere((message) => message.id == 'mine')
+              .effectiveReactionSets['alice'],
+          containsAll([MessageReaction.heart, MessageReaction.laugh]),
+        );
+
+        await tester.longPress(find.byKey(const ValueKey('message-mine')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('reaction-heart')));
+        await tester.pumpAndSettle();
+        expect(
+          container
+              .read(messagesProvider('chat'))
+              .requireValue
+              .singleWhere((message) => message.id == 'mine')
+              .effectiveReactionSets['alice'],
+          [MessageReaction.laugh],
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        container.dispose();
+        await store.close();
+      }
+    },
+  );
 }
 
 class _ReadConversationRepository implements ConversationRepository {
+  @override
+  Future<int> markDelivered(String conversationId, int throughSequence) async =>
+      throughSequence;
+
   @override
   Future<ChatUser> getUser(String userId) async =>
       ChatUser(id: userId, displayName: 'Bob', email: 'bob@example.com');

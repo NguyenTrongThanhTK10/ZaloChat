@@ -54,6 +54,7 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
       if (conversations == null) return;
       for (final conversation in conversations) {
         if (conversation.id == conversationId) {
+          _applyPeerDelivered(conversation.peerLastDeliveredSequence);
           _applyPeerRead(conversation.peerLastReadSequence);
           break;
         }
@@ -202,18 +203,45 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
     _applyUpdatedMessage(updated);
   }
 
+  Future<void> setReaction(
+    ChatMessage message,
+    MessageReaction reaction, {
+    required bool selected,
+  }) async {
+    if (message.sequence == 0) return;
+    final updated = await ref
+        .read(messageRepositoryProvider)
+        .setReaction(message.id, reaction, selected: selected);
+    _applyUpdatedMessage(updated);
+  }
+
+  Future<void> recall(ChatMessage message) async {
+    if (message.sequence == 0 ||
+        message.isRecalled ||
+        message.senderId != _accountId) {
+      return;
+    }
+    final updated = await ref
+        .read(messageRepositoryProvider)
+        .recall(message.id);
+    _applyUpdatedMessage(updated);
+  }
+
   void _applyUpdatedMessage(ChatMessage updated) {
     if (updated.conversationId != conversationId) return;
     final current = state.asData?.value;
-    if (current == null) return;
-    final index = current.indexWhere((message) => message.id == updated.id);
-    if (index < 0) return;
-    final message = updated.copyWith(status: current[index].status);
-    state = AsyncData([
-      ...current.take(index),
-      message,
-      ...current.skip(index + 1),
-    ]);
+    final index =
+        current?.indexWhere((message) => message.id == updated.id) ?? -1;
+    final message = index < 0
+        ? updated
+        : updated.copyWith(status: current![index].status);
+    if (current != null && index >= 0) {
+      state = AsyncData([
+        ...current.take(index),
+        message,
+        ...current.skip(index + 1),
+      ]);
+    }
     final accountId = _accountId;
     if (accountId != null) {
       unawaited(
@@ -288,6 +316,12 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
       final sequence =
           (event.payload['lastReadSequence'] as num?)?.toInt() ?? 0;
       _applyPeerRead(sequence);
+    } else if (event is MessageDeliveredEvent &&
+        event.payload['conversationId'] == conversationId &&
+        event.payload['userId'] != _accountId) {
+      final sequence =
+          (event.payload['lastDeliveredSequence'] as num?)?.toInt() ?? 0;
+      _applyPeerDelivered(sequence);
     } else if (event is ReconnectedEvent) {
       if (!_loadingInitial) unawaited(refresh());
     }
@@ -317,6 +351,30 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
     );
   }
 
+  void _applyPeerDelivered(int sequence) {
+    final accountId = _accountId;
+    final current = state.asData?.value;
+    if (accountId == null || current == null || sequence <= 0) return;
+    var changed = false;
+    final updated = <ChatMessage>[];
+    for (final message in current) {
+      if (message.senderId == accountId &&
+          message.sequence > 0 &&
+          message.sequence <= sequence &&
+          message.status == MessageStatus.sent) {
+        updated.add(message.copyWith(status: MessageStatus.delivered));
+        changed = true;
+      } else {
+        updated.add(message);
+      }
+    }
+    if (!changed) return;
+    state = AsyncData(updated);
+    unawaited(
+      ref.read(chatLocalStoreProvider).upsertMessages(accountId, updated),
+    );
+  }
+
   List<ChatMessage> _merge(
     Iterable<ChatMessage> current,
     Iterable<ChatMessage> incoming,
@@ -329,11 +387,16 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
         message.clientMessageId,
       );
       final previous = byClientId[key];
+      if (previous?.isRecalled == true && !message.isRecalled) continue;
       if (previous == null ||
-          message.sequence > previous.sequence ||
-          (message.sequence == previous.sequence &&
-              _statusRank(message.status) >= _statusRank(previous.status))) {
-        byClientId[key] = message;
+          message.isRecalled && !previous.isRecalled ||
+          message.sequence >= previous.sequence) {
+        byClientId[key] =
+            previous != null &&
+                message.sequence == previous.sequence &&
+                _statusRank(previous.status) > _statusRank(message.status)
+            ? message.copyWith(status: previous.status)
+            : message;
       }
     }
     final list = byClientId.values.toList()
@@ -350,6 +413,13 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
             ?.value
             .peerLastReadSequence ??
         0;
+    final peerDelivered =
+        ref
+            .read(conversationDetailProvider(conversationId))
+            .asData
+            ?.value
+            .peerLastDeliveredSequence ??
+        0;
     final accountId = _accountId;
     return List.unmodifiable([
       for (final message in list)
@@ -357,6 +427,11 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
             message.sequence > 0 &&
             message.sequence <= peerRead)
           message.copyWith(status: MessageStatus.read)
+        else if (message.senderId == accountId &&
+            message.sequence > 0 &&
+            message.sequence <= peerDelivered &&
+            message.status == MessageStatus.sent)
+          message.copyWith(status: MessageStatus.delivered)
         else
           message,
     ]);

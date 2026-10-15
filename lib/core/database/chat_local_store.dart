@@ -15,7 +15,7 @@ class ChatLocalStore extends GeneratedDatabase {
     : super(executor ?? driftDatabase(name: 'appchatdemo_chat'));
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 8;
 
   // The schema is created with SQL below, so it needs no generated Drift code.
   @override
@@ -49,6 +49,19 @@ class ChatLocalStore extends GeneratedDatabase {
           'ALTER TABLE messages ADD COLUMN reply_to_json TEXT',
         );
       }
+      if (from < 7) {
+        await m.database.customStatement(
+          'ALTER TABLE conversations ADD COLUMN last_delivered_sequence INTEGER NOT NULL DEFAULT 0',
+        );
+        await m.database.customStatement(
+          'ALTER TABLE conversations ADD COLUMN peer_last_delivered_sequence INTEGER NOT NULL DEFAULT 0',
+        );
+      }
+      if (from >= 3 && from < 8) {
+        await m.database.customStatement(
+          'ALTER TABLE messages ADD COLUMN is_recalled INTEGER NOT NULL DEFAULT 0',
+        );
+      }
     },
   );
 
@@ -68,6 +81,7 @@ class ChatLocalStore extends GeneratedDatabase {
         kind TEXT NOT NULL DEFAULT 'text',
         voice_duration_ms INTEGER,
         reply_to_json TEXT,
+        is_recalled INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (account_id, conversation_id, sender_id, id),
         UNIQUE (account_id, conversation_id, sender_id, client_message_id)
       )
@@ -144,6 +158,8 @@ class ChatLocalStore extends GeneratedDatabase {
           last_message_at_ms INTEGER,
           last_read_sequence INTEGER NOT NULL,
           peer_last_read_sequence INTEGER NOT NULL,
+          last_delivered_sequence INTEGER NOT NULL,
+          peer_last_delivered_sequence INTEGER NOT NULL,
           PRIMARY KEY (account_id, id)
         )
       ''');
@@ -183,7 +199,8 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT id, title, peer_id, avatar_url, is_group, unread_count,
                is_pinned, is_muted, last_message_preview, last_message_at_ms,
-               last_read_sequence, peer_last_read_sequence
+               last_read_sequence, peer_last_read_sequence,
+               last_delivered_sequence, peer_last_delivered_sequence
         FROM conversations
         WHERE account_id = ?
         ORDER BY is_pinned DESC, COALESCE(last_message_at_ms, 0) DESC, id ASC
@@ -216,6 +233,10 @@ class ChatLocalStore extends GeneratedDatabase {
             },
             lastReadSequence: row.read<int>('last_read_sequence'),
             peerLastReadSequence: row.read<int>('peer_last_read_sequence'),
+            lastDeliveredSequence: row.read<int>('last_delivered_sequence'),
+            peerLastDeliveredSequence: row.read<int>(
+              'peer_last_delivered_sequence',
+            ),
           ),
         )
         .toList(growable: false);
@@ -235,8 +256,9 @@ class ChatLocalStore extends GeneratedDatabase {
       INSERT INTO conversations
         (account_id, id, title, peer_id, avatar_url, is_group, unread_count,
          is_pinned, is_muted, last_message_preview, last_message_at_ms,
-         last_read_sequence, peer_last_read_sequence)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         last_read_sequence, peer_last_read_sequence,
+         last_delivered_sequence, peer_last_delivered_sequence)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT (account_id, id) DO UPDATE SET
         title = excluded.title,
         peer_id = excluded.peer_id,
@@ -248,7 +270,9 @@ class ChatLocalStore extends GeneratedDatabase {
         last_message_preview = excluded.last_message_preview,
         last_message_at_ms = excluded.last_message_at_ms,
         last_read_sequence = excluded.last_read_sequence,
-        peer_last_read_sequence = excluded.peer_last_read_sequence
+        peer_last_read_sequence = excluded.peer_last_read_sequence,
+        last_delivered_sequence = excluded.last_delivered_sequence,
+        peer_last_delivered_sequence = excluded.peer_last_delivered_sequence
     ''',
     [
       accountId,
@@ -264,6 +288,8 @@ class ChatLocalStore extends GeneratedDatabase {
       conversation.lastMessageAt?.toUtc().millisecondsSinceEpoch,
       conversation.lastReadSequence,
       conversation.peerLastReadSequence,
+      conversation.lastDeliveredSequence,
+      conversation.peerLastDeliveredSequence,
     ],
   );
 
@@ -301,7 +327,7 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
                sequence, created_at_ms, status, hearted_by_json, kind,
-               voice_duration_ms, reply_to_json
+               voice_duration_ms, reply_to_json, is_recalled
         FROM messages
         WHERE account_id = ? AND conversation_id = ?
           ${olderPage ? 'AND sequence > 0 AND sequence < ?' : ''}
@@ -369,7 +395,8 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT m.id, m.client_message_id, m.conversation_id, m.sender_id,
                m.body, m.sequence, m.created_at_ms, m.status,
-               m.hearted_by_json, m.kind, m.voice_duration_ms, m.reply_to_json
+               m.hearted_by_json, m.kind, m.voice_duration_ms, m.reply_to_json,
+               m.is_recalled
         FROM outbox AS o
         JOIN messages AS m
           ON m.account_id = o.account_id
@@ -512,7 +539,7 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
                sequence, created_at_ms, status, hearted_by_json, kind,
-               voice_duration_ms, reply_to_json
+               voice_duration_ms, reply_to_json, is_recalled
         FROM messages
         WHERE account_id = ? AND conversation_id = ? AND sender_id = ?
           AND (id = ? OR client_message_id = ?)
@@ -530,6 +557,8 @@ class ChatLocalStore extends GeneratedDatabase {
     for (final row in existingRows) {
       final cached = _readMessage(row);
       if (cached.sequence > value.sequence) {
+        value = cached;
+      } else if (cached.isRecalled && !value.isRecalled) {
         value = cached;
       } else if (cached.status != MessageStatus.failed &&
           cached.status != MessageStatus.sending &&
@@ -559,8 +588,8 @@ class ChatLocalStore extends GeneratedDatabase {
         INSERT INTO messages
           (account_id, id, client_message_id, conversation_id, sender_id,
            body, sequence, created_at_ms, status, hearted_by_json, kind,
-           voice_duration_ms, reply_to_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           voice_duration_ms, reply_to_json, is_recalled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         accountId,
@@ -572,10 +601,18 @@ class ChatLocalStore extends GeneratedDatabase {
         value.sequence,
         value.createdAt.toUtc().millisecondsSinceEpoch,
         value.status.name,
-        jsonEncode(value.heartedBy),
+        jsonEncode(
+          value.effectiveReactionSets.map(
+            (userId, reactions) => MapEntry(
+              userId,
+              reactions.map((reaction) => reaction.name).toList(),
+            ),
+          ),
+        ),
         value.kind.name,
         value.voiceDurationMs,
         value.replyTo == null ? null : jsonEncode(value.replyTo!.toJson()),
+        value.isRecalled ? 1 : 0,
       ],
     );
 
@@ -604,29 +641,52 @@ class ChatLocalStore extends GeneratedDatabase {
     [accountId, conversationId, senderId, clientMessageId],
   );
 
-  ChatMessage _readMessage(QueryRow row) => ChatMessage(
-    id: row.read<String>('id'),
-    clientMessageId: row.read<String>('client_message_id'),
-    conversationId: row.read<String>('conversation_id'),
-    senderId: row.read<String>('sender_id'),
-    text: row.read<String>('body'),
-    sequence: row.read<int>('sequence'),
-    createdAt: DateTime.fromMillisecondsSinceEpoch(
-      row.read<int>('created_at_ms'),
-      isUtc: true,
-    ),
-    status: MessageStatus.values.byName(row.read<String>('status')),
-    heartedBy: (jsonDecode(row.read<String>('hearted_by_json')) as List)
-        .cast<String>(),
-    kind: MessageKind.values.byName(row.read<String>('kind')),
-    voiceDurationMs: row.read<int?>('voice_duration_ms'),
-    replyTo: row.read<String?>('reply_to_json') == null
-        ? null
-        : MessageReply.fromJson(
-            jsonDecode(row.read<String>('reply_to_json'))
-                as Map<String, dynamic>,
-          ),
-  );
+  ChatMessage _readMessage(QueryRow row) {
+    final stored = jsonDecode(row.read<String>('hearted_by_json'));
+    final reactionSets = stored is List
+        ? {
+            for (final userId in stored)
+              userId.toString(): [MessageReaction.heart],
+          }
+        : (stored as Map).map(
+            (userId, selected) => MapEntry(
+              userId.toString(),
+              (selected is List ? selected : [selected])
+                  .map(
+                    (reaction) =>
+                        MessageReaction.values.byName(reaction.toString()),
+                  )
+                  .toList(),
+            ),
+          );
+    return ChatMessage(
+      id: row.read<String>('id'),
+      clientMessageId: row.read<String>('client_message_id'),
+      conversationId: row.read<String>('conversation_id'),
+      senderId: row.read<String>('sender_id'),
+      text: row.read<String>('body'),
+      sequence: row.read<int>('sequence'),
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        row.read<int>('created_at_ms'),
+        isUtc: true,
+      ),
+      status: MessageStatus.values.byName(row.read<String>('status')),
+      heartedBy: [
+        for (final entry in reactionSets.entries)
+          if (entry.value.contains(MessageReaction.heart)) entry.key,
+      ],
+      reactionSets: reactionSets,
+      kind: MessageKind.values.byName(row.read<String>('kind')),
+      voiceDurationMs: row.read<int?>('voice_duration_ms'),
+      replyTo: row.read<String?>('reply_to_json') == null
+          ? null
+          : MessageReply.fromJson(
+              jsonDecode(row.read<String>('reply_to_json'))
+                  as Map<String, dynamic>,
+            ),
+      isRecalled: row.read<int>('is_recalled') != 0,
+    );
+  }
 
   int _deliveryRank(MessageStatus status) => switch (status) {
     MessageStatus.sending => 0,

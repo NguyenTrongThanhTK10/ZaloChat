@@ -110,6 +110,17 @@ class _LegacyV3ChatStore extends GeneratedDatabase {
           PRIMARY KEY (account_id, conversation_id, sender_id, client_message_id)
         )
       ''');
+      await m.database.customStatement('''
+        CREATE TABLE conversations (
+          account_id TEXT NOT NULL, id TEXT NOT NULL, title TEXT NOT NULL,
+          peer_id TEXT NOT NULL, avatar_url TEXT, is_group INTEGER NOT NULL,
+          unread_count INTEGER NOT NULL, is_pinned INTEGER NOT NULL,
+          is_muted INTEGER NOT NULL, last_message_preview TEXT,
+          last_message_at_ms INTEGER, last_read_sequence INTEGER NOT NULL,
+          peer_last_read_sequence INTEGER NOT NULL,
+          PRIMARY KEY (account_id, id)
+        )
+      ''');
     },
   );
 }
@@ -248,7 +259,12 @@ void main() {
       expect(oldMessage.heartedBy, isEmpty);
       await upgraded.upsertMessage(
         'alice',
-        oldMessage.copyWith(heartedBy: ['alice']),
+        oldMessage.copyWith(
+          heartedBy: ['alice'],
+          reactionSets: {
+            'bob': [MessageReaction.like, MessageReaction.wow],
+          },
+        ),
       );
       await upgraded.close();
 
@@ -260,6 +276,13 @@ void main() {
             'conversation',
           )).single.heartedBy,
           ['alice'],
+        );
+        expect(
+          (await reopened.loadMessages(
+            'alice',
+            'conversation',
+          )).single.effectiveReactionSets['bob'],
+          [MessageReaction.like, MessageReaction.wow],
         );
       } finally {
         await reopened.close();
@@ -293,6 +316,8 @@ void main() {
             isOnline: true,
             isTyping: true,
             lastMessageAt: DateTime.utc(2026, 10, 13, 12),
+            lastDeliveredSequence: 8,
+            peerLastDeliveredSequence: 5,
           ),
         );
         await first.close();
@@ -311,6 +336,8 @@ void main() {
           final conversations = await reopened.loadConversations('alice');
           expect(conversations.single.title, 'Bob');
           expect(conversations.single.unreadCount, 2);
+          expect(conversations.single.lastDeliveredSequence, 8);
+          expect(conversations.single.peerLastDeliveredSequence, 5);
           expect(conversations.single.isOnline, isNull);
           expect(conversations.single.isTyping, isFalse);
 

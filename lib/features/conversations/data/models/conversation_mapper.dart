@@ -13,7 +13,13 @@ Conversation conversationFromJson(Object? source) {
     unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
     lastReadSequence: (json['lastReadSequence'] as num?)?.toInt() ?? 0,
     peerLastReadSequence: (json['peerLastReadSequence'] as num?)?.toInt() ?? 0,
-    lastMessagePreview: lastMessage?['kind'] == 'voice'
+    lastDeliveredSequence:
+        (json['lastDeliveredSequence'] as num?)?.toInt() ?? 0,
+    peerLastDeliveredSequence:
+        (json['peerLastDeliveredSequence'] as num?)?.toInt() ?? 0,
+    lastMessagePreview: lastMessage?['isRecalled'] == true
+        ? 'Tin nhắn đã thu hồi'
+        : lastMessage?['kind'] == 'voice'
         ? '🎤 Tin nhắn thoại'
         : lastMessage?['text'] as String?,
     lastMessageAt: lastMessage?['createdAt'] is String

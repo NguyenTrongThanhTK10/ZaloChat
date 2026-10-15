@@ -248,7 +248,7 @@ class ProfilePage extends ConsumerWidget {
               ),
               const SizedBox(height: AppSpacing.xl),
               Text(
-                'Lối Chat · phiên bản 0.1.0',
+                'Lumi Chat · phiên bản 0.1.0',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall?.copyWith(
                   color: scheme.onSurfaceVariant,

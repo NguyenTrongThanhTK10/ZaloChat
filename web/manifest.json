@@ -1,11 +1,11 @@
 {
-    "name": "Lối Chat",
-    "short_name": "Lối Chat",
+    "name": "Lumi Chat",
+    "short_name": "Lumi Chat",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#1365D6",
     "theme_color": "#1365D6",
-    "description": "Ứng dụng trò chuyện Lối Chat.",
+    "description": "Ứng dụng trò chuyện Lumi Chat.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

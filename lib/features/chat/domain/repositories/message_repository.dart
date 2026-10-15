@@ -26,4 +26,12 @@ abstract class MessageRepository {
   Future<String> downloadVoice(String messageId);
 
   Future<ChatMessage> setHeart(String messageId, {required bool hearted});
+
+  Future<ChatMessage> setReaction(
+    String messageId,
+    MessageReaction reaction, {
+    required bool selected,
+  });
+
+  Future<ChatMessage> recall(String messageId);
 }

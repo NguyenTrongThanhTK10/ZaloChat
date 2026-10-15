@@ -27,16 +27,28 @@ public sealed class ConversationRecord
     public long NextSequence { get; set; } = 1;
     public long UserAReadSequence { get; set; }
     public long UserBReadSequence { get; set; }
+    public long UserADeliveredSequence { get; set; }
+    public long UserBDeliveredSequence { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 
     public bool Contains(Guid userId) => UserAId == userId || UserBId == userId;
     public Guid PeerId(Guid userId) => UserAId == userId ? UserBId : UserAId;
     public long ReadSequence(Guid userId) => UserAId == userId ? UserAReadSequence : UserBReadSequence;
+    public long DeliveredSequence(Guid userId) => UserAId == userId
+        ? Math.Max(UserADeliveredSequence, UserAReadSequence)
+        : Math.Max(UserBDeliveredSequence, UserBReadSequence);
 
     public void SetReadSequence(Guid userId, long sequence)
     {
         if (UserAId == userId) UserAReadSequence = sequence;
         else UserBReadSequence = sequence;
+        SetDeliveredSequence(userId, sequence);
+    }
+
+    public void SetDeliveredSequence(Guid userId, long sequence)
+    {
+        if (UserAId == userId) UserADeliveredSequence = Math.Max(UserADeliveredSequence, sequence);
+        else UserBDeliveredSequence = Math.Max(UserBDeliveredSequence, sequence);
     }
 }
 
@@ -53,7 +65,10 @@ public sealed class MessageRecord
     public long Sequence { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public List<Guid> HeartedBy { get; set; } = [];
+    public Dictionary<Guid, string> Reactions { get; set; } = [];
+    public Dictionary<Guid, List<string>> ReactionSets { get; set; } = [];
     public MessageReplyDto? ReplyTo { get; set; }
+    public bool IsRecalled { get; set; }
 }
 
 public sealed class RefreshSessionRecord
@@ -83,13 +98,32 @@ public sealed record MessageDto(
     long Sequence,
     DateTimeOffset CreatedAt,
     IReadOnlyList<Guid> HeartedBy,
-    MessageReplyDto? ReplyTo)
+    MessageReplyDto? ReplyTo,
+    IReadOnlyDictionary<Guid, string> Reactions,
+    IReadOnlyDictionary<Guid, IReadOnlyList<string>> ReactionSets,
+    bool IsRecalled)
 {
-    public static MessageDto From(MessageRecord message) => new(
-        message.Id, message.ClientMessageId, message.ConversationId,
-        message.SenderId, message.Text, message.Kind, message.VoiceDurationMs,
-        message.Sequence, message.CreatedAt,
-        message.HeartedBy.ToArray(), message.ReplyTo);
+    public static MessageDto From(MessageRecord message)
+    {
+        var reactionSets = message.ReactionSets.ToDictionary(
+            item => item.Key, item => new List<string>(item.Value));
+        foreach (var (userId, reaction) in message.Reactions)
+            if (!reactionSets.ContainsKey(userId)) reactionSets[userId] = [reaction];
+        foreach (var userId in message.HeartedBy)
+        {
+            if (!reactionSets.TryGetValue(userId, out var selected))
+                reactionSets[userId] = selected = [];
+            if (!selected.Contains("heart")) selected.Add("heart");
+        }
+        var reactions = reactionSets.ToDictionary(item => item.Key, item => item.Value.Last());
+        return new(message.Id, message.ClientMessageId, message.ConversationId,
+            message.SenderId, message.Text, message.Kind, message.VoiceDurationMs,
+            message.Sequence, message.CreatedAt,
+            reactionSets.Where(item => item.Value.Contains("heart")).Select(item => item.Key).ToArray(),
+            message.ReplyTo, reactions,
+            reactionSets.ToDictionary(item => item.Key, item => (IReadOnlyList<string>)item.Value),
+            message.IsRecalled);
+    }
 }
 
 public sealed record ConversationDto(
@@ -98,15 +132,20 @@ public sealed record ConversationDto(
     MessageDto? LastMessage,
     long UnreadCount,
     long LastReadSequence,
-    long PeerLastReadSequence);
+    long PeerLastReadSequence,
+    long LastDeliveredSequence,
+    long PeerLastDeliveredSequence);
 
 public sealed record AuthDto(UserDto User, string AccessToken, string RefreshToken);
 public sealed record MessagePageDto(IReadOnlyList<MessageDto> Items, long? NextCursor);
 public sealed record ReadDto(long LastReadSequence);
 public sealed record ReadEventDto(Guid ConversationId, Guid UserId, long LastReadSequence);
+public sealed record DeliveredDto(long LastDeliveredSequence);
+public sealed record DeliveredEventDto(Guid ConversationId, Guid UserId, long LastDeliveredSequence);
 public sealed record ApiError(string Code, string Message);
 
 public sealed record RegisterRequest(string? DisplayName, string? Email, string? Password);
+public sealed record SetReactionRequest(string? Type);
 public sealed record LoginRequest(string? Email, string? Password);
 public sealed record RefreshRequest(string? RefreshToken);
 public sealed record UpdateProfileRequest(string? DisplayName, string? Email);
@@ -114,3 +153,4 @@ public sealed record CreateConversationRequest(Guid PeerUserId);
 public sealed record SendMessageRequest(Guid ClientMessageId, string? Text,
     Guid? ReplyToMessageId = null);
 public sealed record MarkReadRequest(long ThroughSequence);
+public sealed record MarkDeliveredRequest(long ThroughSequence);

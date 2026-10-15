@@ -83,4 +83,18 @@ class RemoteConversationRepository implements ConversationRepository {
       throw ApiException.from(error);
     }
   }
+
+  @override
+  Future<int> markDelivered(String conversationId, int throughSequence) async {
+    try {
+      final response = await _dio.post(
+        '/api/conversations/$conversationId/delivered',
+        data: {'throughSequence': throughSequence},
+      );
+      final body = Map<String, dynamic>.from(response.data as Map);
+      return (body['lastDeliveredSequence'] as num).toInt();
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
 }

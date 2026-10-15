@@ -23,7 +23,12 @@ public static partial class ChatEndpoints
         api.MapGet("/messages/{id:guid}/audio", GetVoiceAsync);
         api.MapPut("/messages/{id:guid}/heart", AddHeartAsync);
         api.MapDelete("/messages/{id:guid}/heart", RemoveHeartAsync);
+        api.MapPut("/messages/{id:guid}/reaction", PutReactionAsync);
+        api.MapDelete("/messages/{id:guid}/reaction", DeleteReactionAsync);
+        api.MapDelete("/messages/{id:guid}/reaction/{type}", DeleteReactionTypeAsync);
+        api.MapPut("/messages/{id:guid}/recall", RecallMessageAsync);
         api.MapPost("/conversations/{id:guid}/read", MarkReadAsync);
+        api.MapPost("/conversations/{id:guid}/delivered", MarkDeliveredAsync);
     }
 
     private static async Task<IResult> GetUsersAsync(
@@ -199,7 +204,79 @@ public static partial class ChatEndpoints
             message.Id == messageId && message.ConversationId == conversationId);
         if (target is null)
             throw ApiException.Validation("The replied message must belong to this conversation.");
+        if (target.IsRecalled)
+            throw ApiException.Validation("Cannot reply to a recalled message.");
         return new MessageReplyDto(target.Id, target.SenderId, target.Text, target.Kind);
+    }
+
+    private static async Task<IResult> RecallMessageAsync(
+        Guid id, ClaimsPrincipal principal, ChatStore store, ChatOptions options,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken)
+    {
+        var userId = principal.CurrentUserId();
+        var result = await store.MutateAsync(state =>
+        {
+            var message = state.Messages.FirstOrDefault(item => item.Id == id);
+            if (message is null)
+                throw ApiException.NotFound("Message not found.");
+            var conversation = ChatQueries.GetConversation(state, message.ConversationId, userId);
+            if (message.SenderId != userId)
+                throw ApiException.Forbidden("Only the sender can recall a message.");
+            var changed = !message.IsRecalled;
+            var updatedReplies = new List<MessageDto>();
+            if (changed)
+            {
+                message.IsRecalled = true;
+                message.Text = "";
+                message.VoiceSha256 = null;
+                message.VoiceDurationMs = null;
+                message.ReplyTo = null;
+                message.HeartedBy.Clear();
+                message.Reactions.Clear();
+                message.ReactionSets.Clear();
+                foreach (var reply in state.Messages.Where(item => item.ReplyTo?.Id == id))
+                {
+                    reply.ReplyTo = new MessageReplyDto(id, userId, "Tin nhắn đã thu hồi", "text");
+                    updatedReplies.Add(MessageDto.From(reply));
+                }
+            }
+            var peerId = conversation.PeerId(userId);
+            return new RecallMutation(MessageDto.From(message), changed, peerId, updatedReplies,
+                ChatQueries.ToDto(state, conversation, userId),
+                ChatQueries.ToDto(state, conversation, peerId));
+        }, cancellationToken);
+
+        if (result.Changed)
+        {
+            if (result.Message.Kind == "voice")
+            {
+                var path = VoicePath(options, id);
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch (IOException exception)
+                {
+                    logger.LogWarning(exception, "Could not delete recalled voice file {MessageId}.", id);
+                }
+            }
+            await PublishAsync(async () =>
+            {
+                await Task.WhenAll(
+                    hub.Clients.Group(ChatHub.UserGroup(userId))
+                        .SendAsync("MessageUpdated", result.Message),
+                    hub.Clients.Group(ChatHub.UserGroup(result.PeerId))
+                        .SendAsync("MessageUpdated", result.Message));
+                foreach (var reply in result.UpdatedReplies)
+                {
+                    await Task.WhenAll(
+                        hub.Clients.Group(ChatHub.UserGroup(userId))
+                            .SendAsync("MessageUpdated", reply),
+                        hub.Clients.Group(ChatHub.UserGroup(result.PeerId))
+                            .SendAsync("MessageUpdated", reply));
+                }
+            }, logger);
+            await PublishConversationsAsync(hub, logger, userId, result.PeerId,
+                result.ForUser, result.ForPeer);
+        }
+        return Results.Ok(result.Message);
     }
 
     private static async Task<IResult> MarkReadAsync(
@@ -239,20 +316,77 @@ public static partial class ChatEndpoints
         return Results.Ok(new ReadDto(result.Sequence));
     }
 
+    private static async Task<IResult> MarkDeliveredAsync(
+        Guid id, MarkDeliveredRequest request, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken)
+    {
+        if (request.ThroughSequence < 0)
+            throw ApiException.Validation("throughSequence cannot be negative.");
+        var userId = principal.CurrentUserId();
+        var result = await store.MutateAsync(state =>
+        {
+            var conversation = ChatQueries.GetConversation(state, id, userId);
+            var previous = conversation.DeliveredSequence(userId);
+            var current = Math.Max(previous, Math.Min(request.ThroughSequence,
+                conversation.NextSequence - 1));
+            conversation.SetDeliveredSequence(userId, current);
+            var peerId = conversation.PeerId(userId);
+            return new ReadMutation(current, current > previous, peerId,
+                ChatQueries.ToDto(state, conversation, userId),
+                ChatQueries.ToDto(state, conversation, peerId));
+        }, cancellationToken);
+
+        if (result.Advanced)
+        {
+            var deliveredEvent = new DeliveredEventDto(id, userId, result.Sequence);
+            await PublishAsync(async () =>
+            {
+                await Task.WhenAll(
+                    hub.Clients.Group(ChatHub.UserGroup(userId))
+                        .SendAsync("MessageDelivered", deliveredEvent),
+                    hub.Clients.Group(ChatHub.UserGroup(result.PeerId))
+                        .SendAsync("MessageDelivered", deliveredEvent));
+            }, logger);
+            await PublishConversationsAsync(hub, logger, userId, result.PeerId,
+                result.ForUser, result.ForPeer);
+        }
+        return Results.Ok(new DeliveredDto(result.Sequence));
+    }
+
     private static Task<IResult> AddHeartAsync(
         Guid id, ClaimsPrincipal principal, ChatStore store,
         IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
-        SetHeartAsync(id, true, principal, store, hub, logger, cancellationToken);
+        SetReactionAsync(id, "heart", true, principal, store, hub, logger, cancellationToken);
 
     private static Task<IResult> RemoveHeartAsync(
         Guid id, ClaimsPrincipal principal, ChatStore store,
         IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
-        SetHeartAsync(id, false, principal, store, hub, logger, cancellationToken);
+        SetReactionAsync(id, "heart", false, principal, store, hub, logger, cancellationToken);
 
-    private static async Task<IResult> SetHeartAsync(
-        Guid id, bool hearted, ClaimsPrincipal principal, ChatStore store,
+    private static Task<IResult> PutReactionAsync(
+        Guid id, SetReactionRequest request, ClaimsPrincipal principal, ChatStore store,
         IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken)
     {
+        if (request.Type is null) throw ApiException.Validation("Reaction type is required.");
+        return SetReactionAsync(id, request.Type, true, principal, store, hub, logger, cancellationToken);
+    }
+
+    private static Task<IResult> DeleteReactionAsync(
+        Guid id, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
+        SetReactionAsync(id, null, false, principal, store, hub, logger, cancellationToken);
+
+    private static Task<IResult> DeleteReactionTypeAsync(
+        Guid id, string type, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken) =>
+        SetReactionAsync(id, type, false, principal, store, hub, logger, cancellationToken);
+
+    private static async Task<IResult> SetReactionAsync(
+        Guid id, string? reaction, bool add, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger, CancellationToken cancellationToken)
+    {
+        if (reaction is not null && reaction is not ("heart" or "like" or "laugh" or "wow" or "sad" or "angry"))
+            throw ApiException.Validation("Unsupported reaction type.");
         var userId = principal.CurrentUserId();
         var result = await store.MutateAsync(state =>
         {
@@ -260,14 +394,32 @@ public static partial class ChatEndpoints
             if (message is null)
                 throw ApiException.NotFound("Message not found.");
             var conversation = ChatQueries.GetConversation(state, message.ConversationId, userId);
-            var changed = hearted
-                ? !message.HeartedBy.Contains(userId)
-                : message.HeartedBy.Contains(userId);
-            if (changed)
+            if (message.IsRecalled)
+                throw ApiException.Validation("Cannot react to a recalled message.");
+            foreach (var (legacyUserId, legacyReaction) in message.Reactions)
             {
-                if (hearted) message.HeartedBy.Add(userId);
-                else message.HeartedBy.Remove(userId);
+                if (!message.ReactionSets.ContainsKey(legacyUserId))
+                    message.ReactionSets[legacyUserId] = [legacyReaction];
             }
+            foreach (var legacyUserId in message.HeartedBy)
+            {
+                if (!message.ReactionSets.TryGetValue(legacyUserId, out var hearts))
+                    message.ReactionSets[legacyUserId] = hearts = [];
+                if (!hearts.Contains("heart")) hearts.Add("heart");
+            }
+            if (!message.ReactionSets.TryGetValue(userId, out var selected))
+                message.ReactionSets[userId] = selected = [];
+            var changed = reaction is null ? selected.Count > 0
+                : add ? !selected.Contains(reaction) : selected.Contains(reaction);
+            if (reaction is null) selected.Clear();
+            else if (add) { if (changed) selected.Add(reaction); }
+            else selected.Remove(reaction);
+            if (selected.Count == 0) message.ReactionSets.Remove(userId);
+            message.Reactions = message.ReactionSets.ToDictionary(
+                item => item.Key, item => item.Value.Last());
+            message.HeartedBy = message.ReactionSets
+                .Where(item => item.Value.Contains("heart"))
+                .Select(item => item.Key).ToList();
             return new HeartMutation(MessageDto.From(message), changed,
                 conversation.PeerId(userId));
         }, cancellationToken);
@@ -319,4 +471,7 @@ public static partial class ChatEndpoints
         long Sequence, bool Advanced, Guid PeerId,
         ConversationDto ForUser, ConversationDto ForPeer);
     private sealed record HeartMutation(MessageDto Message, bool Changed, Guid PeerId);
+    private sealed record RecallMutation(MessageDto Message, bool Changed, Guid PeerId,
+        IReadOnlyList<MessageDto> UpdatedReplies,
+        ConversationDto ForUser, ConversationDto ForPeer);
 }

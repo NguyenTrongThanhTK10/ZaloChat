@@ -39,7 +39,8 @@ class _ChatPageState extends ConsumerState<ChatPage>
   final _composerFocus = FocusNode();
   MessageReply? _replyTo;
   final _scrollController = ScrollController();
-  final _heartBusy = <String>{};
+  final _reactionBusy = <String>{};
+  final _recallBusy = <String>{};
   bool _sending = false;
   bool _showEmojiPicker = false;
   bool _showVoicePanel = false;
@@ -459,17 +460,24 @@ class _ChatPageState extends ConsumerState<ChatPage>
     final canReact =
         userId != null &&
         message.sequence > 0 &&
-        !_heartBusy.contains(message.id);
+        !message.isRecalled &&
+        !_reactionBusy.contains(message.id);
     final canReply =
         userId != null &&
         message.sequence > 0 &&
+        !message.isRecalled &&
         !_sending &&
         !_voiceBusy &&
         !_recording &&
         !_speechActive &&
         _recordedVoice == null;
-    final hearted = message.heartedBy.contains(userId);
-    final action = await showModalBottomSheet<_MessageAction>(
+    final canRecall =
+        userId == message.senderId &&
+        message.sequence > 0 &&
+        !message.isRecalled &&
+        !_recallBusy.contains(message.id);
+    final selectedReactions = message.effectiveReactionSets[userId] ?? const [];
+    final action = await showModalBottomSheet<Object>(
       context: context,
       showDragHandle: true,
       builder: (sheetContext) => SafeArea(
@@ -477,21 +485,40 @@ class _ChatPageState extends ConsumerState<ChatPage>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            ListTile(
-              leading: Icon(
-                hearted
-                    ? Icons.favorite_rounded
-                    : Icons.favorite_border_rounded,
-                color: Theme.of(sheetContext).colorScheme.error,
+            if (!message.isRecalled)
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                  children: [
+                    for (final reaction in MessageReaction.values)
+                      Tooltip(
+                        message: selectedReactions.contains(reaction)
+                            ? 'Gỡ ${reaction == MessageReaction.heart ? 'tim' : _reactionLabel(reaction).toLowerCase()}'
+                            : _reactionLabel(reaction),
+                        child: IconButton(
+                          key: ValueKey('reaction-${reaction.name}'),
+                          onPressed: canReact
+                              ? () => Navigator.pop(sheetContext, reaction)
+                              : null,
+                          style: IconButton.styleFrom(
+                            backgroundColor:
+                                selectedReactions.contains(reaction)
+                                ? Theme.of(sheetContext)
+                                      .colorScheme
+                                      .primaryContainer
+                                : null,
+                          ),
+                          icon: _reactionIcon(reaction, size: 26),
+                        ),
+                      ),
+                  ],
+                ),
               ),
-              title: Text(hearted ? 'Bỏ tim' : 'Thả tim'),
-              enabled: canReact,
-              onTap: () => Navigator.pop(sheetContext, _MessageAction.heart),
-            ),
             ListTile(
               leading: const Icon(Icons.copy_rounded),
               title: const Text('Sao chép'),
-              enabled: message.kind == MessageKind.text,
+              enabled: message.kind == MessageKind.text && !message.isRecalled,
               onTap: () => Navigator.pop(sheetContext, _MessageAction.copy),
             ),
             ListTile(
@@ -500,6 +527,13 @@ class _ChatPageState extends ConsumerState<ChatPage>
               enabled: canReply,
               onTap: () => Navigator.pop(sheetContext, _MessageAction.reply),
             ),
+            if (canRecall)
+              ListTile(
+                key: const ValueKey('recall-message-action'),
+                leading: const Icon(Icons.undo_rounded),
+                title: const Text('Thu hồi tin nhắn'),
+                onTap: () => Navigator.pop(sheetContext, _MessageAction.recall),
+              ),
             const SizedBox(height: AppSpacing.sm),
           ],
         ),
@@ -507,8 +541,8 @@ class _ChatPageState extends ConsumerState<ChatPage>
     );
     if (!mounted || widget.conversationId != conversationId) return;
     switch (action) {
-      case _MessageAction.heart:
-        if (canReact) await _toggleHeart(message, userId);
+      case MessageReaction reaction:
+        if (canReact) await _setReaction(message, userId, reaction);
       case _MessageAction.copy:
         await Clipboard.setData(ClipboardData(text: message.text));
         if (mounted) {
@@ -524,26 +558,84 @@ class _ChatPageState extends ConsumerState<ChatPage>
           });
           _composerFocus.requestFocus();
         }
+      case _MessageAction.recall:
+        if (canRecall) await _recallMessage(message);
       case null:
         break;
     }
   }
 
-  Future<void> _toggleHeart(ChatMessage message, String userId) async {
-    if (_heartBusy.contains(message.id)) return;
-    setState(() => _heartBusy.add(message.id));
+  Future<void> _recallMessage(ChatMessage message) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Thu hồi tin nhắn?'),
+        content: const Text(
+          'Nội dung tin nhắn sẽ không còn hiển thị với cả hai người.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Thu hồi'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || confirmed != true || _recallBusy.contains(message.id)) {
+      return;
+    }
+    setState(() => _recallBusy.add(message.id));
     try {
       await ref
           .read(messagesProvider(widget.conversationId).notifier)
-          .setHeart(message, hearted: !message.heartedBy.contains(userId));
+          .recall(message);
+      if (_replyTo?.id == message.id) setState(() => _replyTo = null);
+      if (_voicePlayback?.messageId == message.id) {
+        await _voicePlayback?.pause();
+      }
     } catch (_) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Chưa thể thả tim. Vui lòng thử lại.')),
+          const SnackBar(
+            content: Text('Chưa thể thu hồi tin nhắn. Vui lòng thử lại.'),
+          ),
         );
       }
     } finally {
-      if (mounted) setState(() => _heartBusy.remove(message.id));
+      if (mounted) setState(() => _recallBusy.remove(message.id));
+    }
+  }
+
+  Future<void> _setReaction(
+    ChatMessage message,
+    String userId,
+    MessageReaction reaction,
+  ) async {
+    if (_reactionBusy.contains(message.id)) return;
+    setState(() => _reactionBusy.add(message.id));
+    try {
+      await ref
+          .read(messagesProvider(widget.conversationId).notifier)
+          .setReaction(
+            message,
+            reaction,
+            selected: !(message.effectiveReactionSets[userId] ?? const [])
+                .contains(reaction),
+          );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Chưa thể thả cảm xúc. Vui lòng thử lại.'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _reactionBusy.remove(message.id));
     }
   }
 
@@ -627,6 +719,23 @@ class _ChatPageState extends ConsumerState<ChatPage>
       final list = next.asData?.value;
       if (list == null) {
         return;
+      }
+
+      final playingId = _voicePlayback?.messageId;
+      if (playingId != null &&
+          list.any(
+            (message) => message.id == playingId && message.isRecalled,
+          )) {
+        unawaited(_voicePlayback!.pause());
+      }
+      final replyId = _replyTo?.id;
+      if (replyId != null &&
+          list.any((message) => message.id == replyId && message.isRecalled)) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted && _replyTo?.id == replyId) {
+            setState(() => _replyTo = null);
+          }
+        });
       }
 
       final oldList = previous?.asData?.value;
@@ -856,12 +965,12 @@ class _ChatPageState extends ConsumerState<ChatPage>
               showPeerAvatar: showPeerAvatar,
               peerName: conversation?.title ?? 'Người dùng',
               peerAvatarUrl: conversation?.avatarUrl,
-              heartedByMe: message.heartedBy.contains(currentUserId),
               onHeart:
                   currentUserId != null &&
                       message.sequence > 0 &&
-                      !_heartBusy.contains(message.id)
-                  ? () => _toggleHeart(message, currentUserId)
+                      !message.isRecalled &&
+                      !_reactionBusy.contains(message.id)
+                  ? () => _showMessageActions(message, currentUserId)
                   : null,
               onRetry: message.status == MessageStatus.failed
                   ? () => _retryMessage(message.clientMessageId)
@@ -869,6 +978,7 @@ class _ChatPageState extends ConsumerState<ChatPage>
               playback: _voicePlayback,
               onPlayVoice:
                   message.kind == MessageKind.voice &&
+                      !message.isRecalled &&
                       !_speechActive &&
                       !_recording &&
                       !_voiceBusy
@@ -1413,7 +1523,28 @@ class _DayDivider extends StatelessWidget {
   }
 }
 
-enum _MessageAction { heart, copy, reply }
+enum _MessageAction { copy, reply, recall }
+
+String _reactionLabel(MessageReaction reaction) => switch (reaction) {
+  MessageReaction.heart => 'Thả tim',
+  MessageReaction.like => 'Thích',
+  MessageReaction.laugh => 'Cười',
+  MessageReaction.wow => 'Ngạc nhiên',
+  MessageReaction.sad => 'Khóc',
+  MessageReaction.angry => 'Tức giận',
+};
+
+Widget _reactionIcon(MessageReaction reaction, {double size = 18}) =>
+    reaction == MessageReaction.heart
+    ? Icon(Icons.favorite_rounded, size: size, color: const Color(0xFFE53935))
+    : Text(switch (reaction) {
+        MessageReaction.heart => '❤️',
+        MessageReaction.like => '👍',
+        MessageReaction.laugh => '😆',
+        MessageReaction.wow => '😮',
+        MessageReaction.sad => '😢',
+        MessageReaction.angry => '😡',
+      }, style: TextStyle(fontSize: size));
 
 class _ReplyPreview extends StatelessWidget {
   const _ReplyPreview({
@@ -1486,7 +1617,6 @@ class _MessageBubble extends ConsumerWidget {
     required this.showPeerAvatar,
     required this.peerName,
     this.peerAvatarUrl,
-    required this.heartedByMe,
     this.onHeart,
     this.onRetry,
     this.playback,
@@ -1500,7 +1630,6 @@ class _MessageBubble extends ConsumerWidget {
   final bool showPeerAvatar;
   final String peerName;
   final String? peerAvatarUrl;
-  final bool heartedByMe;
   final VoidCallback? onHeart;
   final VoidCallback? onRetry;
   final VoicePlayback? playback;
@@ -1536,6 +1665,23 @@ class _MessageBubble extends ConsumerWidget {
         scheme.error,
       ),
     };
+    final reactionCounts = <MessageReaction, int>{};
+    for (final selected in message.effectiveReactionSets.values) {
+      for (final reaction in selected.toSet()) {
+        reactionCounts.update(
+          reaction,
+          (count) => count + 1,
+          ifAbsent: () => 1,
+        );
+      }
+    }
+    final reactionTotal = reactionCounts.values.fold<int>(
+      0,
+      (sum, count) => sum + count,
+    );
+    final visibleReactions = MessageReaction.values
+        .where(reactionCounts.containsKey)
+        .toList(growable: false);
 
     return Align(
       alignment: isMine ? Alignment.centerRight : Alignment.centerLeft,
@@ -1579,110 +1725,135 @@ class _MessageBubble extends ConsumerWidget {
                       ? CrossAxisAlignment.end
                       : CrossAxisAlignment.start,
                   children: [
-                    GestureDetector(
-                      key: ValueKey('message-${message.id}'),
-                      onLongPress: onLongPress,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: AppSpacing.lg,
-                          vertical: AppSpacing.md,
-                        ),
-                        decoration: BoxDecoration(
-                          color: isMine
-                              ? scheme.primaryContainer
-                              : scheme.surface,
-                          borderRadius: BorderRadius.only(
-                            topLeft: const Radius.circular(20),
-                            topRight: const Radius.circular(20),
-                            bottomLeft: Radius.circular(isMine ? 20 : 6),
-                            bottomRight: Radius.circular(isMine ? 6 : 20),
+                    Stack(
+                      clipBehavior: Clip.none,
+                      children: [
+                        Padding(
+                          padding: EdgeInsets.only(
+                            bottom: reactionTotal == 0 || message.isRecalled
+                                ? 0
+                                : 14,
                           ),
-                        ),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            if (message.replyTo case final reply?) ...[
-                              _ReplyPreview(
-                                reply: reply,
-                                author: reply.senderId == currentUserId
-                                    ? 'Bạn'
-                                    : peerName,
+                          child: GestureDetector(
+                            key: ValueKey('message-${message.id}'),
+                            onLongPress: onLongPress,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: AppSpacing.lg,
+                                vertical: AppSpacing.md,
                               ),
-                              const SizedBox(height: AppSpacing.sm),
-                            ],
-                            if (message.kind == MessageKind.voice)
-                              _VoiceBubble(
-                                message: message,
-                                playback: playback,
-                                onPlay: onPlayVoice,
-                                isMine: isMine,
-                              )
-                            else
-                              Text(
-                                message.text,
-                                style: theme.textTheme.bodyMedium?.copyWith(
-                                  fontSize: switch (ref.watch(
-                                    messageTextSizeProvider,
-                                  )) {
-                                    MessageTextSize.small => 12,
-                                    MessageTextSize.normal => 14,
-                                    MessageTextSize.large => 18,
-                                  },
-                                  color: isMine
-                                      ? scheme.onPrimaryContainer
-                                      : scheme.onSurface,
-                                  height: 1.4,
+                              decoration: BoxDecoration(
+                                color: isMine
+                                    ? theme.brightness == Brightness.dark
+                                          ? const Color(0xFFDDEBFF)
+                                          : scheme.primaryContainer
+                                    : scheme.surface,
+                                borderRadius: BorderRadius.only(
+                                  topLeft: const Radius.circular(20),
+                                  topRight: const Radius.circular(20),
+                                  bottomLeft: Radius.circular(isMine ? 20 : 6),
+                                  bottomRight: Radius.circular(isMine ? 6 : 20),
                                 ),
                               ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    if (message.heartedBy.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4),
-                        child: Tooltip(
-                          message: heartedByMe ? 'Bỏ tim' : 'Thả tim',
-                          child: Material(
-                            color: heartedByMe
-                                ? scheme.errorContainer
-                                : scheme.surfaceContainerHighest,
-                            borderRadius: BorderRadius.circular(18),
-                            child: InkWell(
-                              borderRadius: BorderRadius.circular(18),
-                              onTap: onHeart,
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 10,
-                                  vertical: 5,
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    Icon(
-                                      heartedByMe
-                                          ? Icons.favorite_rounded
-                                          : Icons.favorite_border_rounded,
-                                      size: 16,
-                                      color: heartedByMe
-                                          ? scheme.error
-                                          : scheme.onSurfaceVariant,
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (!message.isRecalled &&
+                                      message.replyTo != null) ...[
+                                    _ReplyPreview(
+                                      reply: message.replyTo!,
+                                      author:
+                                          message.replyTo!.senderId ==
+                                              currentUserId
+                                          ? 'Bạn'
+                                          : peerName,
                                     ),
-                                    if (message.heartedBy.isNotEmpty) ...[
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        '${message.heartedBy.length}',
-                                        style: theme.textTheme.labelSmall,
-                                      ),
-                                    ],
+                                    const SizedBox(height: AppSpacing.sm),
                                   ],
-                                ),
+                                  if (message.isRecalled)
+                                    Text(
+                                      'Tin nhắn đã thu hồi',
+                                      style: theme.textTheme.bodyMedium
+                                          ?.copyWith(
+                                            fontStyle: FontStyle.italic,
+                                            color: scheme.onSurfaceVariant,
+                                          ),
+                                    )
+                                  else if (message.kind == MessageKind.voice)
+                                    _VoiceBubble(
+                                      message: message,
+                                      playback: playback,
+                                      onPlay: onPlayVoice,
+                                      isMine: isMine,
+                                    )
+                                  else
+                                    Text(
+                                      message.text,
+                                      style: theme.textTheme.bodyMedium
+                                          ?.copyWith(
+                                            fontSize: switch (ref.watch(
+                                              messageTextSizeProvider,
+                                            )) {
+                                              MessageTextSize.small => 12,
+                                              MessageTextSize.normal => 14,
+                                              MessageTextSize.large => 18,
+                                            },
+                                            color: isMine
+                                                ? Colors.black
+                                                : scheme.onSurface,
+                                            height: 1.4,
+                                          ),
+                                    ),
+                                ],
                               ),
                             ),
                           ),
                         ),
-                      ),
+                        if (!message.isRecalled && reactionTotal > 0)
+                          Positioned(
+                            right: 6,
+                            bottom: 0,
+                            child: Tooltip(
+                              message: 'Đổi cảm xúc',
+                              child: Material(
+                                key: ValueKey('message-hearts-${message.id}'),
+                                color: scheme.surface,
+                                elevation: 1,
+                                borderRadius: BorderRadius.circular(18),
+                                child: InkWell(
+                                  borderRadius: BorderRadius.circular(18),
+                                  onTap: onHeart,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 7,
+                                      vertical: 4,
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        for (final (index, reaction)
+                                            in visibleReactions.indexed) ...[
+                                          if (index > 0)
+                                            const SizedBox(width: 3),
+                                          _reactionIcon(reaction),
+                                        ],
+                                        if (reactionTotal > 1) ...[
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            '$reactionTotal',
+                                            style: theme.textTheme.labelSmall,
+                                          ),
+                                        ],
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                     const SizedBox(height: AppSpacing.xs),
                     Row(
                       mainAxisSize: MainAxisSize.min,
@@ -1695,9 +1866,13 @@ class _MessageBubble extends ConsumerWidget {
                         ),
                         if (isMine) ...[
                           const SizedBox(width: AppSpacing.xs),
-                          Tooltip(
-                            message: status.$1,
-                            child: Icon(status.$2, size: 15, color: status.$3),
+                          Icon(status.$2, size: 15, color: status.$3),
+                          const SizedBox(width: 3),
+                          Text(
+                            status.$1,
+                            style: theme.textTheme.labelSmall?.copyWith(
+                              color: status.$3,
+                            ),
                           ),
                         ],
                       ],
@@ -1737,7 +1912,7 @@ class _VoiceBubble extends StatelessWidget {
     final durationMs = message.voiceDurationMs ?? 0;
     final totalSeconds = (durationMs / 1000).ceil();
     final scheme = Theme.of(context).colorScheme;
-    final foreground = isMine ? scheme.onPrimaryContainer : scheme.primary;
+    final foreground = isMine ? Colors.black : scheme.primary;
     return ListenableBuilder(
       listenable: playback ?? const _SilentListenable(),
       builder: (context, _) {

@@ -6,6 +6,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="Data/**/*.cs" />
     <Content Update="openapi.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -2,7 +2,9 @@
 
 ## Trạng thái triển khai hiện tại
 
-Kho mã đã có một luồng chat văn bản và tin nhắn thoại 1–1 chạy với dữ liệu thật: đăng ký/đăng nhập, tìm người dùng, tạo hội thoại, gửi và nhận tin qua API + SignalR, chọn emoji, nhấn giữ để thả tim/sao chép/trả lời tin nhắn, phân trang lịch sử, trạng thái đã đọc, lưu cache và hàng đợi gửi khi mất mạng. Flutter dùng Riverpod, GoRouter, Dio, Drift và giao diện Material 3 sáng/tối. Backend ASP.NET Core và hợp đồng OpenAPI nằm trong [`backend/`](backend/README.md). Các mục bên dưới là **đặc tả phát triển tiếp**, không phải danh sách tính năng đã hoàn tất. Chat nhóm, hình ảnh/video/tài liệu, gọi, thông báo đẩy, presence và E2EE chưa được triển khai. Tin nhắn thoại ghi tối đa 2 phút, gửi tệp `.m4a` tối đa 2 MB và phát lại trong hội thoại; cần cấp quyền micro cho ứng dụng.
+Kho mã đã có một luồng chat văn bản và tin nhắn thoại 1–1 chạy với dữ liệu thật: đăng ký/đăng nhập, tìm người dùng, tạo hội thoại, gửi và nhận tin qua API + SignalR, chọn emoji, nhấn giữ để thả tim/thích/cười/ngạc nhiên/khóc/tức giận, sao chép hoặc trả lời tin nhắn, phân trang lịch sử, trạng thái đã đọc, lưu cache và hàng đợi gửi khi mất mạng. Flutter dùng Riverpod, GoRouter, Dio, Drift và giao diện Material 3 sáng/tối. Backend ASP.NET Core và hợp đồng OpenAPI nằm trong [`backend/`](backend/README.md). Các mục bên dưới là **đặc tả phát triển tiếp**, không phải danh sách tính năng đã hoàn tất. Chat nhóm, hình ảnh/video/tài liệu, gọi, thông báo đẩy, presence và E2EE chưa được triển khai. Tin nhắn thoại ghi tối đa 2 phút, gửi tệp `.m4a` tối đa 2 MB và phát lại trong hội thoại; cần cấp quyền micro cho ứng dụng.
+
+Tin nhắn của bạn hiển thị **Đã gửi** khi API lưu thành công, **Đã nhận** khi ứng dụng của người nhận đã tải và lưu tin, và **Đã xem** khi người nhận mở cuộc trò chuyện. Trạng thái cập nhật qua SignalR và được đồng bộ lại khi kết nối trở lại.
 
 ### Chạy thử
 
@@ -10,21 +12,25 @@ Trong màn hình chat, chạm biểu tượng micro cạnh ô nhập để mở 
 
 Nhận dạng dùng dịch vụ của Android/iOS qua [`speech_to_text`](https://pub.dev/packages/speech_to_text), dành cho câu chat ngắn và có thể cần mạng. Cần cấp quyền micro và, trên iOS, quyền nhận dạng giọng nói. Máy ảo phải có dịch vụ nhận dạng và micro hoạt động; khi dịch vụ không khả dụng, ứng dụng giữ bản nháp và cho phép thử lại. Sau khi thêm plugin, chạy lại ứng dụng hoàn toàn để nạp mã native.
 
-1. Khởi động backend trên máy phát triển:
+1. Khởi động backend trên máy phát triển (lệnh này nhận kết nối trên cổng 5080 từ máy local và thiết bị cùng mạng LAN):
 
    ```sh
    cd backend/src/Chat.Api
    dotnet run --launch-profile Chat.Api
    ```
 
-2. Ở terminal khác, chạy Flutter. Tạo hai tài khoản trong ứng dụng để thử nhắn tin; backend không tạo dữ liệu mẫu.
+   Kiểm tra API tại `http://localhost:5080/health`. Nếu chạy trên điện thoại thật, hai thiết bị cần cùng mạng và tường lửa máy chạy backend cần cho phép cổng 5080.
+
+2. Mở [`lib/core/config/app_config.dart`](lib/core/config/app_config.dart), sửa duy nhất `AppConfig.apiBaseUrl` thành địa chỉ máy chạy API (không thêm dấu `/` ở cuối). Sau đó, ở terminal khác chạy Flutter. Tạo hai tài khoản trong ứng dụng để thử nhắn tin; backend không tạo dữ liệu mẫu.
 
    ```sh
    flutter pub get
-   flutter run --dart-define=API_BASE_URL=http://10.0.2.2:5080
+   flutter run
    ```
 
-   `10.0.2.2` là địa chỉ máy host từ Android Emulator. Với iOS Simulator, dùng `http://127.0.0.1:5080`. Với hai thiết bị thật, chạy backend bằng `--urls http://0.0.0.0:5080` và truyền địa chỉ LAN của máy host qua `API_BASE_URL` trên cả hai thiết bị. Android debug cho phép HTTP để thử nghiệm nội bộ; bản phát hành phải dùng endpoint HTTPS. iOS khai báo quyền kết nối mạng nội bộ. Không sử dụng tài khoản thật trên máy chủ HTTP thử nghiệm.
+   Dùng `http://10.0.2.2:5080` cho Android Emulator, `http://127.0.0.1:5080` cho iOS Simulator, hoặc `http://<IP-LAN-của-máy-chạy-API>:5080` cho điện thoại thật khi hai máy kết nối được với nhau qua LAN. URL hiện tại trong file là `http://127.0.0.1:5080` để dùng với Android cắm USB và `adb reverse` như hướng dẫn bên dưới. Khi chuyển máy, chỉ cần đổi URL này; đường dẫn Android SDK và Flutter SDK được Flutter tạo riêng trên từng máy trong `android/local.properties`. Android debug cho phép HTTP để thử nghiệm nội bộ; bản phát hành cần endpoint HTTPS. iOS khai báo quyền kết nối mạng nội bộ. Không sử dụng tài khoản thật trên máy chủ HTTP thử nghiệm.
+
+   Nếu cần APK để cài và thử trên máy Android, dùng `flutter build apk --debug`. File đầu ra nằm ở `build/app/outputs/flutter-apk/app-debug.apk`.
 
    Khi cập nhật mã backend hoặc thêm plugin Flutter, hãy khởi động lại backend và chạy lại ứng dụng. Hàng đợi gửi khi mất mạng hiện chỉ áp dụng cho tin văn bản; bản ghi âm gửi lỗi có thể thử lại khi còn ở màn hình chat.
 
@@ -32,10 +38,10 @@ Nhận dạng dùng dịch vụ của Android/iOS qua [`speech_to_text`](https:/
 
    ```sh
    adb reverse tcp:5080 tcp:5080
-   flutter run --dart-define=API_BASE_URL=http://127.0.0.1:5080
+   flutter run
    ```
 
-   Chạy lại `adb reverse` sau khi rút/cắm lại thiết bị. Log `[API]` trong Flutter debug hiển thị địa chỉ gọi, mã HTTP hoặc loại lỗi kết nối; log không chứa header, token hay nội dung request.
+   Trước khi chạy, đổi `AppConfig.apiBaseUrl` thành `http://127.0.0.1:5080`. Chạy lại `adb reverse` sau khi rút/cắm lại thiết bị. Log `[API]` trong Flutter debug hiển thị địa chỉ gọi, mã HTTP hoặc loại lỗi kết nối; log không chứa header, token hay nội dung request.
 
 3. Kiểm tra mã nguồn:
 

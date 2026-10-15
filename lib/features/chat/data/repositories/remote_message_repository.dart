@@ -77,6 +77,33 @@ class RemoteMessageRepository implements MessageRepository {
   }
 
   @override
+  Future<ChatMessage> setReaction(
+    String messageId,
+    MessageReaction reaction, {
+    required bool selected,
+  }) async {
+    try {
+      final path = '/api/messages/$messageId/reaction';
+      final response = !selected
+          ? await _dio.delete('$path/${reaction.name}')
+          : await _dio.put(path, data: {'type': reaction.name});
+      return messageFromJson(response.data);
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  @override
+  Future<ChatMessage> recall(String messageId) async {
+    try {
+      final response = await _dio.put('/api/messages/$messageId/recall');
+      return messageFromJson(response.data);
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  @override
   Future<ChatMessage> sendVoice(
     String conversationId,
     String clientMessageId,

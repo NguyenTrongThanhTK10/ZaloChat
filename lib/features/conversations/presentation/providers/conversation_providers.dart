@@ -7,6 +7,8 @@ import '../../../../core/realtime/realtime_providers.dart';
 import '../../../../core/realtime/realtime_service.dart';
 import '../../../auth/domain/entities/chat_user.dart';
 import '../../../auth/presentation/providers/auth_providers.dart';
+import '../../../chat/data/models/message_mapper.dart';
+import '../../../chat/data/repositories/remote_message_repository.dart';
 import '../../data/models/conversation_mapper.dart';
 import '../../data/repositories/remote_conversation_repository.dart';
 import '../../domain/entities/conversation.dart';
@@ -72,6 +74,7 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
       final updates = _updatesDuringLoad.values.toList();
       final merged = _mergeUpdates(remote, clear: true);
       _loadingRemote = false;
+      unawaited(_syncIncoming(merged));
       if (updates.isNotEmpty) {
         unawaited(store.upsertConversations(accountId, updates));
       }
@@ -92,14 +95,22 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
       } catch (_) {
         unawaited(refresh());
       }
+    } else if (event is MessageCreatedEvent) {
+      unawaited(_receiveIncoming(event.payload));
     } else if (event is ReconnectedEvent) {
       if (!_loadingRemote) unawaited(refresh());
     }
   }
 
   void upsert(Conversation conversation) {
-    if (_loadingRemote) _updatesDuringLoad[conversation.id] = conversation;
     final current = state.asData?.value;
+    final previous = current
+        ?.where((item) => item.id == conversation.id)
+        .firstOrNull;
+    if (previous != null) {
+      conversation = _preserveCursors(conversation, previous);
+    }
+    if (_loadingRemote) _updatesDuringLoad[conversation.id] = conversation;
     final updated =
         [conversation, ...?current?.where((item) => item.id != conversation.id)]
           ..sort((a, b) {
@@ -135,6 +146,7 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
       final merged = _mergeUpdates(remote, clear: true);
       _loadingRemote = false;
       state = AsyncData(merged);
+      unawaited(_syncIncoming(merged));
       if (updates.isNotEmpty) {
         unawaited(
           ref
@@ -189,6 +201,9 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
             lastReadSequence: conversation.lastReadSequence > sequence
                 ? conversation.lastReadSequence
                 : sequence,
+            lastDeliveredSequence: conversation.lastDeliveredSequence > sequence
+                ? conversation.lastDeliveredSequence
+                : sequence,
           )
         else
           conversation,
@@ -207,6 +222,80 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
     }
   }
 
+  Future<void> markDelivered(String id, int throughSequence) async {
+    if (!ref.mounted) return;
+    final accountId = ref.read(currentUserProvider)?.id;
+    if (accountId == null) return;
+    final sequence = await ref
+        .read(conversationRepositoryProvider)
+        .markDelivered(id, throughSequence);
+    if (!ref.mounted) return;
+    final current = state.asData?.value;
+    if (current == null) return;
+    for (final conversation in current) {
+      if (conversation.id != id) continue;
+      if (conversation.lastDeliveredSequence >= sequence) return;
+      upsert(conversation.copyWith(lastDeliveredSequence: sequence));
+      return;
+    }
+  }
+
+  Future<void> _receiveIncoming(Map<String, dynamic> payload) async {
+    if (!ref.mounted) return;
+    final accountId = ref.read(currentUserProvider)?.id;
+    if (accountId == null || payload['senderId'] == accountId) return;
+    try {
+      final message = messageFromJson(payload);
+      await ref.read(chatLocalStoreProvider).upsertMessage(accountId, message);
+      if (!ref.mounted) return;
+      await markDelivered(message.conversationId, message.sequence);
+    } catch (_) {
+      // A reconnect refresh will retry any missed acknowledgement.
+    }
+  }
+
+  Future<void> _syncIncoming(List<Conversation> conversations) async {
+    if (!ref.mounted) return;
+    if (ref.read(realtimeServiceProvider) == null) return;
+    final accountId = ref.read(currentUserProvider)?.id;
+    if (accountId == null) return;
+    final repository = RemoteMessageRepository(
+      ref.read(apiClientProvider).dio,
+      accountId,
+    );
+    for (final conversation in conversations) {
+      if (!ref.mounted) return;
+      if (conversation.unreadCount == 0) continue;
+      try {
+        int? beforeSequence;
+        while (true) {
+          final page = await repository.fetchPage(
+            conversation.id,
+            beforeSequence: beforeSequence,
+          );
+          if (!ref.mounted) return;
+          await ref
+              .read(chatLocalStoreProvider)
+              .upsertMessages(accountId, page.items);
+          if (!ref.mounted) return;
+          final newestIncoming = page.items
+              .where((message) => message.senderId != accountId)
+              .firstOrNull;
+          if (newestIncoming != null) {
+            if (newestIncoming.sequence > conversation.lastDeliveredSequence) {
+              await markDelivered(conversation.id, newestIncoming.sequence);
+            }
+            break;
+          }
+          beforeSequence = page.nextCursor;
+          if (beforeSequence == null) break;
+        }
+      } catch (_) {
+        // Keep existing cursor; the next refresh or reconnect retries.
+      }
+    }
+  }
+
   List<Conversation> _mergeUpdates(
     List<Conversation> base, {
     bool clear = false,
@@ -214,7 +303,12 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
     final byId = {
       for (final conversation in base) conversation.id: conversation,
     };
-    byId.addAll(_updatesDuringLoad);
+    for (final entry in _updatesDuringLoad.entries) {
+      final previous = byId[entry.key];
+      byId[entry.key] = previous == null
+          ? entry.value
+          : _preserveCursors(entry.value, previous);
+    }
     if (clear) _updatesDuringLoad.clear();
     final updated = byId.values.toList()
       ..sort((a, b) {
@@ -225,4 +319,23 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
       });
     return List.unmodifiable(updated);
   }
+
+  Conversation _preserveCursors(Conversation value, Conversation previous) =>
+      value.copyWith(
+        lastReadSequence: previous.lastReadSequence > value.lastReadSequence
+            ? previous.lastReadSequence
+            : value.lastReadSequence,
+        peerLastReadSequence:
+            previous.peerLastReadSequence > value.peerLastReadSequence
+            ? previous.peerLastReadSequence
+            : value.peerLastReadSequence,
+        lastDeliveredSequence:
+            previous.lastDeliveredSequence > value.lastDeliveredSequence
+            ? previous.lastDeliveredSequence
+            : value.lastDeliveredSequence,
+        peerLastDeliveredSequence:
+            previous.peerLastDeliveredSequence > value.peerLastDeliveredSequence
+            ? previous.peerLastDeliveredSequence
+            : value.peerLastDeliveredSequence,
+      );
 }

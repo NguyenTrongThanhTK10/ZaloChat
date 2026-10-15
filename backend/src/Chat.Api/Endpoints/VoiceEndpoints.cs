@@ -139,7 +139,7 @@ public static partial class ChatEndpoints
         var message = await store.ReadAsync(state =>
         {
             var found = state.Messages.FirstOrDefault(item => item.Id == id);
-            if (found is null || found.Kind != "voice")
+            if (found is null || found.Kind != "voice" || found.IsRecalled)
                 throw ApiException.NotFound("Voice message not found.");
             ChatQueries.GetConversation(state, found.ConversationId, userId);
             return MessageDto.From(found);
