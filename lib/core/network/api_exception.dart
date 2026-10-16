@@ -28,6 +28,14 @@ class ApiException implements Exception {
             'Bạn thao tác quá nhanh. Vui lòng thử lại sau.',
         'Text must contain 1 to 4000 characters.':
             'Tin nhắn cần từ 1 đến 4.000 ký tự.',
+        'Attachment must be between 1 byte and 20 MB.':
+            'Vui lòng chọn tệp từ 1 byte đến 20 MB.',
+        'Attachment filename must contain 1 to 180 characters.':
+            'Tên tệp cần từ 1 đến 180 ký tự.',
+        'Caption must be at most 4000 characters.':
+            'Chú thích tối đa 4.000 ký tự.',
+        'Unsupported image. Use JPEG, PNG, GIF, WebP, BMP, HEIC or AVIF.': 'Ảnh chưa được hỗ trợ. Vui lòng chọn JPEG, PNG, GIF, WebP, BMP, HEIC hoặc AVIF.',
+        'Attachment not found.': 'Tệp không còn khả dụng hoặc đã được thu hồi.',
       };
       return ApiException(
         localized[serverMessage] ??

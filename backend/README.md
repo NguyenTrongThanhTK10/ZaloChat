@@ -1,6 +1,6 @@
 # Chat API (local MVP)
 
-ASP.NET Core 8 API for one-to-one text and voice chat. This is a runnable MVP for two or more locally registered accounts. It does not create sample accounts or messages.
+ASP.NET Core 8 API for one-to-one text, voice, image and file chat. This is a runnable MVP for two or more locally registered accounts. It does not create sample accounts or messages.
 
 ## Chạy bằng Visual Studio trên Windows
 
@@ -46,11 +46,15 @@ All IDs are UUID strings. Times are UTC ISO 8601 strings. Protected endpoints re
 | POST | `/api/auth/refresh` | `{refreshToken}` | 200 `{user,accessToken,refreshToken}`; old refresh token is revoked |
 | GET | `/api/auth/me` | none | `User` |
 | PUT | `/api/auth/me` | `{displayName,email}` | Updated `User`; duplicate email returns 409 |
+| PUT | `/api/auth/me/profile` | multipart `displayName`, `email`, optional `avatar` (max 5 MB) or `removeAvatar=true` | Updated `User`, saved atomically; publishes updated peer details to existing conversations |
+| GET | `/api/users/{id}/avatar/{version}` | signed-in user | Current avatar image; previous versions return 404 after replacement/removal |
 | GET | `/api/users?query=...` | none | `User[]` excluding caller, max 50 |
 | GET | `/api/conversations` | none | `Conversation[]` newest activity first |
 | POST | `/api/conversations` | `{peerUserId}` | `Conversation`; repeated creation returns the existing conversation |
 | GET | `/api/conversations/{id}/messages?beforeSequence=123&limit=30` | none | `{items:Message[],nextCursor:number?}`; newest first, next cursor is the oldest returned sequence |
 | POST | `/api/conversations/{id}/messages` | `{clientMessageId,text,replyToMessageId?}` | 201 `Message` or 200 for an identical retry; same ID with different text is 409 |
+| POST | `/api/conversations/{id}/attachments` | multipart `clientMessageId`, `kind` (`image` or `file`), `file`, optional `text` and `replyToMessageId` | 201 `Message` or 200 for an identical retry; 1 byte to 20 MB |
+| GET | `/api/messages/{id}/attachment` | conversation member | attachment bytes; unavailable after recall |
 | POST | `/api/conversations/{id}/voice` | multipart `clientMessageId`, `durationMs`, `audio` (`.m4a`), optional `replyToMessageId` | 201 `Message` or 200 for an identical retry; up to 2 MB and 120 seconds |
 | GET | `/api/messages/{id}/audio` | none | `audio/mp4`; only conversation members may download |
 | PUT | `/api/messages/{id}/heart` | none | 200 `Message`; adds the caller's heart, idempotent |
@@ -60,7 +64,7 @@ All IDs are UUID strings. Times are UTC ISO 8601 strings. Protected endpoints re
 | POST | `/api/conversations/{id}/read` | `{throughSequence}` | `{lastReadSequence}`; cursor advances monotonically |
 | POST | `/api/conversations/{id}/delivered` | `{throughSequence}` | `{lastDeliveredSequence}`; cursor advances monotonically |
 
-`User`: `{id,displayName,email}`. `Message`: `{id,clientMessageId,conversationId,senderId,text,kind,voiceDurationMs,sequence,createdAt,heartedBy,reactions,replyTo}`; `kind` is `text` or `voice`; `voiceDurationMs` is null for text messages. `reactions` maps user IDs to reaction types, with one reaction per user per message. `heartedBy` remains for compatibility and contains only users whose current reaction is `heart`. `Conversation`: `{id,peer:User,lastMessage:Message?,unreadCount,lastReadSequence,peerLastReadSequence,lastDeliveredSequence,peerLastDeliveredSequence}`. The `last*` cursors belong to the authenticated user; `peerLast*` cursors belong to the peer. Delivery means the recipient app has stored the message; read means the recipient opened the conversation. A read cursor also advances delivery. `nextCursor` is null at the end of history. A message with `sequence < beforeSequence` is returned on the next page, so clients avoid duplicate boundary items.
+`User`: `{id,displayName,email,avatarUrl}`. `avatarUrl` is null or a versioned relative path requiring bearer authentication. `Message`: `{id,clientMessageId,conversationId,senderId,text,kind,voiceDurationMs,sequence,createdAt,heartedBy,reactions,replyTo}`; `kind` is `text`, `voice`, `image` or `file`; `voiceDurationMs` is null except for voice messages. Image/file messages include `attachment: {name,size,contentType}` and an optional caption in `text`. Images are recognized by their signature; other files download as `application/octet-stream`. `reactions` maps user IDs to reaction types, with one reaction per user per message. `heartedBy` remains for compatibility and contains only users whose current reaction is `heart`. `Conversation`: `{id,peer:User,lastMessage:Message?,unreadCount,lastReadSequence,peerLastReadSequence,lastDeliveredSequence,peerLastDeliveredSequence}`. The `last*` cursors belong to the authenticated user; `peerLast*` cursors belong to the peer. Delivery means the recipient app has stored the message; read means the recipient opened the conversation. A read cursor also advances delivery. `nextCursor` is null at the end of history. A message with `sequence < beforeSequence` is returned on the next page, so clients avoid duplicate boundary items.
 
 For example, register two accounts, create a conversation with the other user's ID, then send:
 
@@ -68,7 +72,7 @@ For example, register two accounts, create a conversation with the other user's 
 {"clientMessageId":"a67b4864-43b4-43a7-84b4-3b6dbd117510","text":"Xin chào!"}
 ```
 
-`replyTo` is null or `{id,senderId,text,kind}`. The server creates this quote from a message in the same conversation; clients send only `replyToMessageId`. Both text and voice messages can reply to text or voice. Reusing a client ID with a different reply target returns 409.
+`replyTo` is null or `{id,senderId,text,kind}`. The server creates this quote from a message in the same conversation; clients send only `replyToMessageId`. Text, voice, image and file messages can quote any non-recalled message in the conversation. Reusing a client ID with a different reply target returns 409.
 
 ## Realtime contract
 
@@ -84,4 +88,8 @@ On reconnect, fetch `/api/conversations/{id}/messages` with cursor pagination an
 
 ## Scope and operational notes
 
-Voice files are stored in a private `voice/` directory next to `Chat__DataPath`. Back up that directory and the JSON data file together while the server is stopped. The file store writes an atomic snapshot after each mutation, holds an exclusive process lock, and keeps password hashes and refresh token hashes only. The application is single-process and optimized for a local two-device MVP. It does not yet implement group chat, image/video/document attachments, push notifications, presence, delivery receipts, E2EE, database migrations, distributed realtime, or backup automation. Back up the data file while the server is stopped. Set `Chat__DataPath` to an OS-protected location and restrict file permissions in deployment.
+Voice files and attachments are stored in private `voice/`, `attachments/` and `avatars/` directories next to `Chat__DataPath`. Back up those directories and the JSON data file together while the server is stopped. The file store writes an atomic snapshot after each mutation, holds an exclusive process lock, and keeps password hashes and refresh token hashes only. The application is single-process and optimized for a local two-device MVP. It does not yet implement group chat, video previews, push notifications, presence, delivery receipts, E2EE, database migrations, distributed realtime, or backup automation. Back up the data file while the server is stopped. Set `Chat__DataPath` to an OS-protected location and restrict file permissions in deployment.
+
+The Flutter composer opens an image/file picker from the paperclip button when empty. Select one file (up to 20 MB), add an optional caption, then send. Images have an inline preview and a zoom viewer; documents download into the per-account private cache and open in an installed app. Failed uploads stay in the composer for an identical retry during the current session; only text messages use the durable offline outbox. Restart Flutter after adding the native file-picker/open-file plugins, and restart the API for the new endpoints.
+
+The profile screen supports changing the name/email and selecting or removing an avatar before saving. Flutter accepts source images up to 10 MB and prepares a centered 512×512 PNG; the server independently checks the image signature and 5 MB upload limit. New avatar URLs propagate through user and conversation DTOs; the authenticated avatar loader uses the existing token refresh flow.

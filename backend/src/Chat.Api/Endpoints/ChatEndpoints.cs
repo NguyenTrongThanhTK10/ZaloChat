@@ -21,6 +21,9 @@ public static partial class ChatEndpoints
         api.MapPost("/conversations/{id:guid}/voice", SendVoiceAsync)
             .RequireRateLimiting("send");
         api.MapGet("/messages/{id:guid}/audio", GetVoiceAsync);
+        api.MapPost("/conversations/{id:guid}/attachments", SendAttachmentAsync)
+            .RequireRateLimiting("send");
+        api.MapGet("/messages/{id:guid}/attachment", GetAttachmentAsync);
         api.MapPut("/messages/{id:guid}/heart", AddHeartAsync);
         api.MapDelete("/messages/{id:guid}/heart", RemoveHeartAsync);
         api.MapPut("/messages/{id:guid}/reaction", PutReactionAsync);
@@ -206,7 +209,13 @@ public static partial class ChatEndpoints
             throw ApiException.Validation("The replied message must belong to this conversation.");
         if (target.IsRecalled)
             throw ApiException.Validation("Cannot reply to a recalled message.");
-        return new MessageReplyDto(target.Id, target.SenderId, target.Text, target.Kind);
+        var text = target.Kind switch
+        {
+            "image" => "Ảnh",
+            "file" => target.Attachment?.Name ?? "Tệp đính kèm",
+            _ => target.Text
+        };
+        return new MessageReplyDto(target.Id, target.SenderId, text, target.Kind);
     }
 
     private static async Task<IResult> RecallMessageAsync(
@@ -230,6 +239,7 @@ public static partial class ChatEndpoints
                 message.Text = "";
                 message.VoiceSha256 = null;
                 message.VoiceDurationMs = null;
+                message.Attachment = null;
                 message.ReplyTo = null;
                 message.HeartedBy.Clear();
                 message.Reactions.Clear();
@@ -255,6 +265,15 @@ public static partial class ChatEndpoints
                 catch (IOException exception)
                 {
                     logger.LogWarning(exception, "Could not delete recalled voice file {MessageId}.", id);
+                }
+            }
+            if (result.Message.Kind is "image" or "file")
+            {
+                var path = AttachmentPath(options, id);
+                try { if (File.Exists(path)) File.Delete(path); }
+                catch (IOException exception)
+                {
+                    logger.LogWarning(exception, "Could not delete recalled attachment {MessageId}.", id);
                 }
             }
             await PublishAsync(async () =>

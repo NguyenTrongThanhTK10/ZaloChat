@@ -7,6 +7,8 @@ public sealed class ChatOptions
 {
     public required string DataPath { get; init; }
     public string VoiceDirectory => Path.Combine(Path.GetDirectoryName(DataPath)!, "voice");
+    public string AttachmentDirectory => Path.Combine(Path.GetDirectoryName(DataPath)!, "attachments");
+    public string AvatarDirectory => Path.Combine(Path.GetDirectoryName(DataPath)!, "avatars");
     public required byte[] SigningKey { get; init; }
 
     public static ChatOptions From(IConfiguration configuration, IHostEnvironment environment)

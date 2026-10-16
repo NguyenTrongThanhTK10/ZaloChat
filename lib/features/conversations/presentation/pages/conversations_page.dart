@@ -362,6 +362,7 @@ class _NewChatSheetState extends ConsumerState<_NewChatSheet> {
                                 },
                                 icon: ChatAvatar(
                                   name: user.displayName,
+                                  imageUrl: user.avatarUrl,
                                   size: 44,
                                 ),
                               ),

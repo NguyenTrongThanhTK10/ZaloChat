@@ -195,6 +195,37 @@ class MessagesNotifier extends AsyncNotifier<List<ChatMessage>> {
     await _sendPending(pending);
   }
 
+  Future<void> sendAttachment(
+    String filePath,
+    String fileName,
+    MessageKind kind, {
+    required String clientMessageId,
+    String text = '',
+    MessageReply? replyTo,
+  }) async {
+    final accountId = _accountId;
+    if (accountId == null) throw StateError('Sign in to send attachments');
+    final message = await ref
+        .read(messageRepositoryProvider)
+        .sendAttachment(
+          conversationId,
+          clientMessageId,
+          filePath,
+          fileName,
+          kind,
+          text: text,
+          replyToMessageId: replyTo?.id,
+        );
+    await ref.read(chatLocalStoreProvider).upsertMessage(accountId, message);
+    state = AsyncData(_merge(state.asData?.value ?? const [], [message]));
+    unawaited(
+      ref
+          .read(conversationListProvider.notifier)
+          .refresh()
+          .catchError((Object _) {}),
+    );
+  }
+
   Future<void> setHeart(ChatMessage message, {required bool hearted}) async {
     if (message.sequence == 0) return;
     final updated = await ref

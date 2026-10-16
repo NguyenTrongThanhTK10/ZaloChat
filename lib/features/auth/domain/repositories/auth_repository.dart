@@ -10,5 +10,10 @@ abstract class AuthRepository {
     String password,
   );
   Future<void> logout();
-  Future<ChatUser> updateProfile(String displayName, String email);
+  Future<ChatUser> updateProfile(
+    String displayName,
+    String email, {
+    String? avatarPath,
+    bool removeAvatar = false,
+  });
 }

@@ -54,6 +54,7 @@ class RemoteConversationRepository implements ConversationRepository {
       id: json['id'] as String,
       displayName: json['displayName'] as String,
       email: json['email'] as String,
+      avatarUrl: json['avatarUrl'] as String?,
     );
   }
 

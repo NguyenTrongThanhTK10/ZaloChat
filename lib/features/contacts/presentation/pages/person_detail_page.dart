@@ -69,7 +69,11 @@ class _PersonDetailPageState extends ConsumerState<PersonDetailPage> {
                     padding: const EdgeInsets.all(AppSpacing.xl),
                     child: Column(
                       children: [
-                        ChatAvatar(name: person.displayName, size: 88),
+                        ChatAvatar(
+                          name: person.displayName,
+                          imageUrl: person.avatarUrl,
+                          size: 88,
+                        ),
                         const SizedBox(height: AppSpacing.lg),
                         Text(
                           person.displayName,

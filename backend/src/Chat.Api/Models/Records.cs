@@ -14,6 +14,7 @@ public sealed class UserRecord
     public Guid Id { get; set; }
     public string DisplayName { get; set; } = "";
     public string Email { get; set; } = "";
+    public AvatarRecord? Avatar { get; set; }
     public string PasswordSalt { get; set; } = "";
     public string PasswordHash { get; set; } = "";
     public DateTimeOffset CreatedAt { get; set; }
@@ -62,6 +63,7 @@ public sealed class MessageRecord
     public string Kind { get; set; } = "text";
     public int? VoiceDurationMs { get; set; }
     public string? VoiceSha256 { get; set; }
+    public AttachmentRecord? Attachment { get; set; }
     public long Sequence { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public List<Guid> HeartedBy { get; set; } = [];
@@ -80,10 +82,16 @@ public sealed class RefreshSessionRecord
     public bool Revoked { get; set; }
 }
 
-public sealed record UserDto(Guid Id, string DisplayName, string Email)
+public sealed record AvatarRecord(Guid Version, string ContentType);
+
+public sealed record UserDto(Guid Id, string DisplayName, string Email, string? AvatarUrl)
 {
-    public static UserDto From(UserRecord user) => new(user.Id, user.DisplayName, user.Email);
+    public static UserDto From(UserRecord user) => new(user.Id, user.DisplayName, user.Email,
+        user.Avatar is { } avatar ? $"/api/users/{user.Id}/avatar/{avatar.Version}" : null);
 }
+
+public sealed record AttachmentRecord(string Name, long Size, string ContentType, string Sha256);
+public sealed record AttachmentDto(string Name, long Size, string ContentType);
 
 public sealed record MessageReplyDto(Guid Id, Guid SenderId, string Text, string Kind);
 
@@ -101,7 +109,8 @@ public sealed record MessageDto(
     MessageReplyDto? ReplyTo,
     IReadOnlyDictionary<Guid, string> Reactions,
     IReadOnlyDictionary<Guid, IReadOnlyList<string>> ReactionSets,
-    bool IsRecalled)
+    bool IsRecalled,
+    AttachmentDto? Attachment)
 {
     public static MessageDto From(MessageRecord message)
     {
@@ -122,7 +131,10 @@ public sealed record MessageDto(
             reactionSets.Where(item => item.Value.Contains("heart")).Select(item => item.Key).ToArray(),
             message.ReplyTo, reactions,
             reactionSets.ToDictionary(item => item.Key, item => (IReadOnlyList<string>)item.Value),
-            message.IsRecalled);
+            message.IsRecalled,
+            message.Attachment is { } attachment
+                ? new AttachmentDto(attachment.Name, attachment.Size, attachment.ContentType)
+                : null);
     }
 }
 

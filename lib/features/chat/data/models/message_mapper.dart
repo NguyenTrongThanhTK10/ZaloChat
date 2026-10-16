@@ -8,7 +8,12 @@ ChatMessage messageFromJson(Object? source) {
     conversationId: json['conversationId'] as String,
     senderId: json['senderId'] as String,
     text: json['text'] as String,
-    kind: json['kind'] == 'voice' ? MessageKind.voice : MessageKind.text,
+    kind: messageKindFromName(json['kind']),
+    attachment: json['attachment'] is Map
+        ? MessageAttachment.fromJson(
+            Map<String, dynamic>.from(json['attachment'] as Map),
+          )
+        : null,
     voiceDurationMs: (json['voiceDurationMs'] as num?)?.toInt(),
     replyTo: json['replyTo'] is Map
         ? MessageReply.fromJson(

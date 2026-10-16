@@ -37,6 +37,9 @@ class ApiClient {
             }
             options.extra['retried'] = true;
             options.headers['Authorization'] = 'Bearer $token';
+            if (options.data case final FormData form) {
+              options.data = form.clone();
+            }
             handler.resolve(await dio.fetch<dynamic>(options));
           } catch (_) {
             handler.next(error);

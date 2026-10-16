@@ -6,8 +6,7 @@ import '../../../../app/chat_preferences_provider.dart';
 import '../../../../app/theme_mode_provider.dart';
 import '../../../../core/database/chat_local_store_provider.dart';
 import '../../../../core/network/api_exception.dart';
-import '../../../../core/theme/app_theme.dart';
-import '../../../../core/widgets/chat_avatar.dart';
+import '../widgets/profile_components.dart';
 import '../../../auth/presentation/providers/auth_providers.dart';
 import '../../../chat/presentation/providers/message_providers.dart';
 import '../../../conversations/presentation/providers/conversation_providers.dart';
@@ -76,182 +75,128 @@ class ProfilePage extends ConsumerWidget {
     final scheme = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Cá nhân')),
+      appBar: AppBar(
+        title: Text(
+          'Cá nhân',
+          style: theme.textTheme.headlineSmall?.copyWith(
+            fontWeight: FontWeight.w800,
+            letterSpacing: -0.6,
+          ),
+        ),
+        backgroundColor: theme.scaffoldBackgroundColor,
+        toolbarHeight: 72,
+      ),
       body: Center(
         child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 720),
+          constraints: const BoxConstraints(maxWidth: 620),
           child: ListView(
-            padding: const EdgeInsets.all(AppSpacing.lg),
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 28),
             children: [
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(AppSpacing.xl),
-                  child: Row(
-                    children: [
-                      ChatAvatar(name: user?.displayName ?? '?', size: 64),
-                      const SizedBox(width: AppSpacing.lg),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              user?.displayName ?? '',
-                              style: theme.textTheme.titleLarge?.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            const SizedBox(height: AppSpacing.xs),
-                            Text(
-                              user?.email ?? '',
-                              style: TextStyle(color: scheme.onSurfaceVariant),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+              ProfileHeaderCard(
+                user: user,
+                onEdit: () => context.push('/profile/edit'),
+                onPhoto: () => context.push('/profile/edit?photo=true'),
               ),
-              const SizedBox(height: AppSpacing.sm),
-              Card(
-                child: ListTile(
-                  leading: const Icon(Icons.edit_outlined),
-                  title: const Text('Chỉnh sửa thông tin cá nhân'),
-                  subtitle: const Text('Cập nhật tên hiển thị và email'),
-                  trailing: const Icon(Icons.chevron_right_rounded),
-                  onTap: () => context.push('/profile/edit'),
-                ),
-              ),
-              const SizedBox(height: AppSpacing.xl),
-              _sectionTitle(context, 'Giao diện'),
-              Card(
-                child: ListTile(
-                  leading: const Icon(Icons.palette_outlined),
-                  title: const Text('Chế độ hiển thị'),
-                  subtitle: const Text(
-                    'Chọn giao diện sáng, tối hoặc theo máy',
-                  ),
-                  trailing: DropdownButton<ThemeMode>(
+              const SizedBox(height: 28),
+              ProfileSection(
+                title: 'Giao diện',
+                children: [
+                  ProfileThemePicker(
                     value: themeMode,
-                    underline: const SizedBox.shrink(),
-                    onChanged: (mode) {
-                      if (mode != null) {
-                        ref.read(themeModeProvider.notifier).setMode(mode);
+                    onChanged: (mode) =>
+                        ref.read(themeModeProvider.notifier).setMode(mode),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              ProfileSection(
+                title: 'Trò chuyện',
+                children: [
+                  ProfileSettingTile(
+                    icon: Icons.text_fields_rounded,
+                    title: 'Cỡ chữ tin nhắn',
+                    value: switch (textSize) {
+                      MessageTextSize.small => 'Nhỏ',
+                      MessageTextSize.normal => 'Vừa',
+                      MessageTextSize.large => 'Lớn',
+                    },
+                    onTap: () => _chooseTextSize(context, ref, textSize),
+                  ),
+                  SwitchListTile(
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 8,
+                    ),
+                    secondary: ProfileSettingIcon(
+                      icon: Icons.chat_bubble_outline_rounded,
+                      color: scheme.primary,
+                    ),
+                    title: const Text(
+                      'Xem trước tin nhắn',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                    ),
+                    subtitle: Text(
+                      'Hiện nội dung trong danh sách chat',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: scheme.onSurfaceVariant,
+                      ),
+                    ),
+                    value: showPreview,
+                    onChanged: (visible) => ref
+                        .read(messagePreviewProvider.notifier)
+                        .setVisible(visible),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              ProfileSection(
+                title: 'Dữ liệu & tài khoản',
+                children: [
+                  ProfileSettingTile(
+                    icon: Icons.cleaning_services_outlined,
+                    title: 'Xóa dữ liệu đã tải',
+                    subtitle: 'Giải phóng bộ nhớ tin nhắn trên thiết bị',
+                    onTap: () => _clearHistory(context, ref),
+                  ),
+                  ProfileSettingTile(
+                    icon: Icons.logout_rounded,
+                    title: 'Đăng xuất',
+                    destructive: true,
+                    onTap: () async {
+                      try {
+                        await ref.read(authProvider.notifier).logout();
+                      } catch (error) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(ApiException.from(error).message),
+                            ),
+                          );
+                        }
                       }
                     },
-                    items: const [
-                      DropdownMenuItem(
-                        value: ThemeMode.system,
-                        child: Text('Hệ thống'),
-                      ),
-                      DropdownMenuItem(
-                        value: ThemeMode.light,
-                        child: Text('Sáng'),
-                      ),
-                      DropdownMenuItem(
-                        value: ThemeMode.dark,
-                        child: Text('Tối'),
-                      ),
-                    ],
                   ),
-                ),
+                ],
               ),
-              const SizedBox(height: AppSpacing.xl),
-              _sectionTitle(context, 'Tin nhắn'),
-              Card(
-                child: Column(
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.format_size_rounded),
-                      title: const Text('Cỡ chữ tin nhắn'),
-                      subtitle: const Text(
-                        'Áp dụng cho nội dung cuộc trò chuyện',
-                      ),
-                      trailing: DropdownButton<MessageTextSize>(
-                        value: textSize,
-                        underline: const SizedBox.shrink(),
-                        onChanged: (size) {
-                          if (size != null) {
-                            ref
-                                .read(messageTextSizeProvider.notifier)
-                                .setSize(size);
-                          }
-                        },
-                        items: const [
-                          DropdownMenuItem(
-                            value: MessageTextSize.small,
-                            child: Text('Nhỏ'),
-                          ),
-                          DropdownMenuItem(
-                            value: MessageTextSize.normal,
-                            child: Text('Vừa'),
-                          ),
-                          DropdownMenuItem(
-                            value: MessageTextSize.large,
-                            child: Text('Lớn'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1, indent: 56),
-                    SwitchListTile(
-                      secondary: const Icon(Icons.preview_outlined),
-                      title: const Text('Hiện nội dung xem trước'),
-                      subtitle: const Text(
-                        'Hiện tin nhắn mới nhất trong danh sách',
-                      ),
-                      value: showPreview,
-                      onChanged: (value) => ref
-                          .read(messagePreviewProvider.notifier)
-                          .setVisible(value),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: AppSpacing.xl),
-              _sectionTitle(context, 'Dữ liệu và tài khoản'),
-              Card(
-                child: Column(
-                  children: [
-                    ListTile(
-                      leading: const Icon(Icons.cleaning_services_outlined),
-                      title: const Text('Xóa dữ liệu đã tải'),
-                      subtitle: const Text(
-                        'Giải phóng dữ liệu tin nhắn trên thiết bị',
-                      ),
-                      trailing: const Icon(Icons.chevron_right_rounded),
-                      onTap: () => _clearHistory(context, ref),
-                    ),
-                    const Divider(height: 1, indent: 56),
-                    ListTile(
-                      leading: Icon(Icons.logout_rounded, color: scheme.error),
-                      title: Text(
-                        'Đăng xuất',
-                        style: TextStyle(color: scheme.error),
-                      ),
-                      onTap: () async {
-                        try {
-                          await ref.read(authProvider.notifier).logout();
-                        } catch (error) {
-                          if (context.mounted) {
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(
-                                content: Text(ApiException.from(error).message),
-                              ),
-                            );
-                          }
-                        }
-                      },
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: AppSpacing.xl),
+              const SizedBox(height: 28),
               Text(
-                'Lumi Chat · phiên bản 0.1.0',
+                'Lumi Chat',
+                textAlign: TextAlign.center,
+                style: theme.textTheme.labelLarge?.copyWith(
+                  color: scheme.onSurfaceVariant,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Phiên bản 0.1.0',
                 textAlign: TextAlign.center,
                 style: theme.textTheme.bodySmall?.copyWith(
-                  color: scheme.onSurfaceVariant,
+                  color: scheme.onSurfaceVariant.withValues(alpha: 0.7),
                 ),
               ),
             ],
@@ -261,8 +206,52 @@ class ProfilePage extends ConsumerWidget {
     );
   }
 
-  Widget _sectionTitle(BuildContext context, String title) => Padding(
-    padding: const EdgeInsets.only(left: AppSpacing.xs, bottom: AppSpacing.sm),
-    child: Text(title, style: Theme.of(context).textTheme.titleMedium),
-  );
+  Future<void> _chooseTextSize(
+    BuildContext context,
+    WidgetRef ref,
+    MessageTextSize current,
+  ) async {
+    final selected = await showModalBottomSheet<MessageTextSize>(
+      context: context,
+      showDragHandle: true,
+      useSafeArea: true,
+      builder: (context) => SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 0, 12, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(bottom: 16),
+                child: Text(
+                  'Cỡ chữ tin nhắn',
+                  style: Theme.of(context).textTheme.titleLarge
+                      ?.copyWith(fontWeight: FontWeight.w700),
+                ),
+              ),
+              for (final (size, label, fontSize) in [
+                (MessageTextSize.small, 'Nhỏ', 12.0),
+                (MessageTextSize.normal, 'Vừa', 14.0),
+                (MessageTextSize.large, 'Lớn', 18.0),
+              ])
+                ListTile(
+                  title: Text(label, style: TextStyle(fontSize: fontSize)),
+                  trailing: size == current
+                      ? Icon(
+                          Icons.check_circle_rounded,
+                          color: Theme.of(context).colorScheme.primary,
+                        )
+                      : null,
+                  onTap: () => Navigator.pop(context, size),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+    if (selected != null) {
+      await ref.read(messageTextSizeProvider.notifier).setSize(selected);
+    }
+  }
 }

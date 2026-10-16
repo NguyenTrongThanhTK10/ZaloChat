@@ -126,6 +126,73 @@ class _LegacyV3ChatStore extends GeneratedDatabase {
 }
 
 void main() {
+  test('attachment metadata survives restart and recall clears it', () async {
+    final directory = await Directory.systemTemp.createTemp(
+      'chat-attachment-test-',
+    );
+    final file = File('${directory.path}/messages.sqlite');
+    try {
+      final first = ChatLocalStore(executor: NativeDatabase(file));
+      await first.upsertMessage(
+        'alice',
+        ChatMessage(
+          id: 'attachment',
+          clientMessageId: 'attachment-client',
+          conversationId: 'conversation',
+          senderId: 'bob',
+          text: 'Ảnh hôm nay',
+          sequence: 1,
+          kind: MessageKind.image,
+          createdAt: DateTime.utc(2026, 10, 16),
+          status: MessageStatus.sent,
+          attachment: const MessageAttachment(
+            name: 'photo.png',
+            size: 2048,
+            contentType: 'image/png',
+          ),
+        ),
+      );
+      await first.close();
+      final reopened = ChatLocalStore(executor: NativeDatabase(file));
+      try {
+        final image = (await reopened.loadMessages(
+          'alice',
+          'conversation',
+        )).single;
+        expect(image.kind, MessageKind.image);
+        expect(image.attachment?.toJson(), {
+          'name': 'photo.png',
+          'size': 2048,
+          'contentType': 'image/png',
+        });
+        await reopened.upsertMessage(
+          'alice',
+          ChatMessage(
+            id: image.id,
+            clientMessageId: image.clientMessageId,
+            conversationId: image.conversationId,
+            senderId: image.senderId,
+            text: '',
+            sequence: image.sequence,
+            kind: image.kind,
+            createdAt: image.createdAt,
+            status: image.status,
+            isRecalled: true,
+          ),
+        );
+        final recalled = (await reopened.loadMessages(
+          'alice',
+          'conversation',
+        )).single;
+        expect(recalled.isRecalled, isTrue);
+        expect(recalled.attachment, isNull);
+      } finally {
+        await reopened.close();
+      }
+    } finally {
+      await directory.delete(recursive: true);
+    }
+  });
   test(
     'v5 cache upgrades and preserves queued replies after restart',
     () async {

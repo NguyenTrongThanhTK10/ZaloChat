@@ -17,6 +17,8 @@
 	<string>Ứng dụng kết nối máy chủ chat trên mạng nội bộ khi bạn thử nghiệm.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Ứng dụng cần microphone để gửi tin nhắn thoại và nhập văn bản bằng giọng nói.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Ứng dụng cho phép bạn chọn ảnh để gửi trong cuộc trò chuyện.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Ứng dụng nhận dạng giọng nói để điền văn bản vào ô soạn tin nhắn.</string>
 	<key>CFBundleExecutable</key>

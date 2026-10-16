@@ -65,11 +65,29 @@ class RemoteAuthRepository implements AuthRepository {
   Future<void> logout() => _tokenStore.clear();
 
   @override
-  Future<ChatUser> updateProfile(String displayName, String email) async {
+  Future<ChatUser> updateProfile(
+    String displayName,
+    String email, {
+    String? avatarPath,
+    bool removeAvatar = false,
+  }) async {
     try {
+      final withAvatar = avatarPath != null || removeAvatar;
       final response = await _dio.put(
-        '/api/auth/me',
-        data: {'displayName': displayName, 'email': email},
+        withAvatar ? '/api/auth/me/profile' : '/api/auth/me',
+        data: withAvatar
+            ? FormData.fromMap({
+                'displayName': displayName,
+                'email': email,
+                'removeAvatar': removeAvatar.toString(),
+                if (avatarPath != null)
+                  'avatar': await MultipartFile.fromFile(
+                    avatarPath,
+                    filename: 'avatar.png',
+                    contentType: DioMediaType('image', 'png'),
+                  ),
+              })
+            : {'displayName': displayName, 'email': email},
       );
       final user = _userFromJson(response.data);
       await _saveUser(user);
@@ -83,6 +101,7 @@ class RemoteAuthRepository implements AuthRepository {
     'id': user.id,
     'displayName': user.displayName,
     'email': user.email,
+    if (user.avatarUrl != null) 'avatarUrl': user.avatarUrl!,
   });
 
   ChatUser _userFromJson(Object? source) {
@@ -91,6 +110,7 @@ class RemoteAuthRepository implements AuthRepository {
       id: json['id'] as String,
       displayName: json['displayName'] as String,
       email: json['email'] as String,
+      avatarUrl: json['avatarUrl'] as String?,
     );
   }
 }

@@ -25,6 +25,18 @@ abstract class MessageRepository {
 
   Future<String> downloadVoice(String messageId);
 
+  Future<ChatMessage> sendAttachment(
+    String conversationId,
+    String clientMessageId,
+    String filePath,
+    String fileName,
+    MessageKind kind, {
+    String text = '',
+    String? replyToMessageId,
+  });
+
+  Future<String> downloadAttachment(ChatMessage message);
+
   Future<ChatMessage> setHeart(String messageId, {required bool hearted});
 
   Future<ChatMessage> setReaction(

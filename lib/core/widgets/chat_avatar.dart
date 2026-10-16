@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../media/avatar_provider.dart';
 import '../theme/app_theme.dart';
 
 class ChatAvatar extends StatelessWidget {
@@ -7,6 +9,7 @@ class ChatAvatar extends StatelessWidget {
     super.key,
     required this.name,
     this.imageUrl,
+    this.imageProvider,
     this.size = 52,
     this.online = false,
     this.isGroup = false,
@@ -14,6 +17,7 @@ class ChatAvatar extends StatelessWidget {
 
   final String name;
   final String? imageUrl;
+  final ImageProvider? imageProvider;
   final double size;
   final bool online;
   final bool isGroup;
@@ -38,7 +42,41 @@ class ChatAvatar extends StatelessWidget {
               radius: size / 2,
               backgroundColor: scheme.primaryContainer,
               child: ClipOval(
-                child: url == null || url.isEmpty
+                child: imageProvider != null
+                    ? Image(
+                        image: imageProvider!,
+                        width: size,
+                        height: size,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => _fallback(context, initial),
+                      )
+                    : url != null &&
+                          url.startsWith('/api/users/') &&
+                          url.contains('/avatar/')
+                    ? Consumer(
+                        builder: (context, ref, _) => ref
+                            .watch(avatarBytesProvider(url))
+                            .when(
+                              data: (bytes) => Image.memory(
+                                bytes,
+                                width: size,
+                                height: size,
+                                fit: BoxFit.cover,
+                                cacheWidth:
+                                    (size *
+                                            MediaQuery.devicePixelRatioOf(
+                                              context,
+                                            ))
+                                        .round()
+                                        .clamp(1, 512),
+                                errorBuilder: (_, _, _) =>
+                                    _fallback(context, initial),
+                              ),
+                              loading: () => _fallback(context, initial),
+                              error: (_, _) => _fallback(context, initial),
+                            ),
+                      )
+                    : url == null || url.isEmpty
                     ? _fallback(context, initial)
                     : Image.network(
                         url,

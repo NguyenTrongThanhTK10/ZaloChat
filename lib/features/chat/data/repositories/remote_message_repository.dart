@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:dio/dio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../../core/network/api_exception.dart';
 import '../../domain/entities/chat_message.dart';
@@ -129,6 +130,71 @@ class RemoteMessageRepository implements MessageRepository {
       );
       return messageFromJson(response.data);
     } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  @override
+  Future<ChatMessage> sendAttachment(
+    String conversationId,
+    String clientMessageId,
+    String filePath,
+    String fileName,
+    MessageKind kind, {
+    String text = '',
+    String? replyToMessageId,
+  }) async {
+    try {
+      final form = FormData.fromMap({
+        'clientMessageId': clientMessageId,
+        'kind': kind.name,
+        'text': text,
+        'replyToMessageId': ?replyToMessageId,
+        'file': await MultipartFile.fromFile(filePath, filename: fileName),
+      });
+      final response = await _dio.post(
+        '/api/conversations/$conversationId/attachments',
+        data: form,
+        options: Options(sendTimeout: const Duration(minutes: 2)),
+      );
+      return messageFromJson(response.data);
+    } catch (error) {
+      throw ApiException.from(error);
+    }
+  }
+
+  @override
+  Future<String> downloadAttachment(ChatMessage message) async {
+    final accountId = _accountId;
+    final attachment = message.attachment;
+    if (accountId == null || attachment == null || message.isRecalled) {
+      throw StateError('Attachment unavailable');
+    }
+    final safeName = attachment.name.replaceAll(RegExp(r'[/\\\x00-\x1f]'), '_');
+    if (safeName.isEmpty || safeName == '.' || safeName == '..') {
+      throw StateError('Invalid attachment filename');
+    }
+    final cache = Directory(
+      '${(await getTemporaryDirectory()).path}/attachments/$accountId/${message.id}',
+    );
+    await cache.create(recursive: true);
+    final file = File('${cache.path}/$safeName');
+    if (await file.exists() && await file.length() == attachment.size) {
+      return file.path;
+    }
+    final partial = File('${file.path}.${const Uuid().v4()}.partial');
+    try {
+      await _dio.download(
+        '/api/messages/${message.id}/attachment',
+        partial.path,
+      );
+      if (await partial.length() != attachment.size) {
+        throw StateError('Incomplete attachment download');
+      }
+      await partial.rename(file.path);
+      return file.path;
+    } catch (error) {
+      if (await partial.exists()) await partial.delete();
       throw ApiException.from(error);
     }
   }

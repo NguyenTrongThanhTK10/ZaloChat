@@ -87,10 +87,20 @@ class AuthNotifier extends AsyncNotifier<AuthSession?> {
     state = const AsyncData(null);
   }
 
-  Future<void> updateProfile(String displayName, String email) async {
+  Future<void> updateProfile(
+    String displayName,
+    String email, {
+    String? avatarPath,
+    bool removeAvatar = false,
+  }) async {
     final user = await ref
         .read(authRepositoryProvider)
-        .updateProfile(displayName, email);
+        .updateProfile(
+          displayName,
+          email,
+          avatarPath: avatarPath,
+          removeAvatar: removeAvatar,
+        );
     if (!ref.mounted || state.asData?.value?.user.id != user.id) return;
     state = AsyncData(AuthSession(user));
   }

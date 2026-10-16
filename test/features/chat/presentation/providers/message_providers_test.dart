@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 
 import 'package:appchatdemo/core/database/chat_local_store.dart';
 import 'package:appchatdemo/core/database/chat_local_store_provider.dart';
@@ -6,6 +8,7 @@ import 'package:appchatdemo/core/media/speech_input.dart';
 import 'package:appchatdemo/core/media/speech_input_provider.dart';
 import 'package:appchatdemo/core/realtime/realtime_providers.dart';
 import 'package:appchatdemo/core/widgets/chat_avatar.dart';
+import 'package:appchatdemo/core/theme/app_theme.dart';
 import 'package:appchatdemo/features/auth/domain/entities/chat_user.dart';
 import 'package:appchatdemo/features/auth/presentation/providers/auth_providers.dart';
 import 'package:appchatdemo/features/chat/domain/entities/chat_message.dart';
@@ -13,6 +16,8 @@ import 'package:appchatdemo/features/chat/domain/entities/message_page.dart';
 import 'package:appchatdemo/features/chat/domain/repositories/message_repository.dart';
 import 'package:appchatdemo/features/chat/presentation/pages/chat_page.dart';
 import 'package:appchatdemo/features/chat/presentation/providers/message_providers.dart';
+import 'package:appchatdemo/features/chat/presentation/providers/attachment_providers.dart';
+import 'package:appchatdemo/features/chat/presentation/widgets/attachment_bubble.dart';
 import 'package:appchatdemo/features/conversations/domain/entities/conversation.dart';
 import 'package:appchatdemo/features/conversations/domain/repositories/conversation_repository.dart';
 import 'package:appchatdemo/features/conversations/presentation/providers/conversation_providers.dart';
@@ -77,6 +82,44 @@ class _MessageRepository implements MessageRepository {
   final List<_SendAttempt> attempts = [];
   Completer<void>? sendStarted;
   Future<ChatMessage>? nextSendResult;
+  Future<ChatMessage>? nextAttachmentResult;
+  String? attachmentPath;
+  final attachmentAttempts =
+      <({String clientId, String text, MessageKind kind})>[];
+
+  @override
+  Future<ChatMessage> sendAttachment(
+    String conversationId,
+    String clientMessageId,
+    String filePath,
+    String fileName,
+    MessageKind kind, {
+    String text = '',
+    String? replyToMessageId,
+  }) async {
+    attachmentAttempts.add((clientId: clientMessageId, text: text, kind: kind));
+    return nextAttachmentResult ??
+        ChatMessage(
+          id: 'attachment-server',
+          clientMessageId: clientMessageId,
+          conversationId: conversationId,
+          senderId: 'alice',
+          text: text,
+          kind: kind,
+          attachment: MessageAttachment(
+            name: fileName,
+            size: 42,
+            contentType: 'application/octet-stream',
+          ),
+          sequence: 14,
+          createdAt: DateTime.utc(2026, 10, 16),
+          status: MessageStatus.sent,
+        );
+  }
+
+  @override
+  Future<String> downloadAttachment(ChatMessage message) async =>
+      attachmentPath ?? '/tmp/${message.attachment!.name}';
 
   @override
   Future<MessagePage> fetchPage(
@@ -196,6 +239,21 @@ class _MessageRepository implements MessageRepository {
   Future<String> downloadVoice(String messageId) async => '/tmp/$messageId.m4a';
 }
 
+class _AttachmentService extends AttachmentService {
+  PickedChatAttachment? selected;
+  final pickedImages = <bool>[];
+  final opened = <String>[];
+
+  @override
+  Future<PickedChatAttachment?> pick({required bool image}) async {
+    pickedImages.add(image);
+    return selected;
+  }
+
+  @override
+  Future<void> open(String path) async => opened.add(path);
+}
+
 class _ConversationRepository implements ConversationRepository {
   @override
   Future<int> markDelivered(String conversationId, int throughSequence) async =>
@@ -247,6 +305,186 @@ void main() {
     SharedPreferencesAsyncPlatform.instance =
         InMemorySharedPreferencesAsync.empty();
   });
+  testWidgets(
+    'attachment picker keeps failed upload and retries without duplicating',
+    (tester) async {
+      final store = ChatLocalStore(executor: NativeDatabase.memory());
+      final repository = _MessageRepository();
+      final attachments = _AttachmentService()
+        ..selected = PickedChatAttachment(
+          path: '/tmp/ke-hoach.pdf',
+          metadata: const MessageAttachment(
+            name: 'ke-hoach.pdf',
+            size: 42,
+            contentType: 'application/octet-stream',
+          ),
+          kind: MessageKind.file,
+        );
+      final container = ProviderContainer(
+        overrides: [
+          currentUserProvider.overrideWithValue(_account),
+          realtimeServiceProvider.overrideWithValue(null),
+          chatLocalStoreProvider.overrideWithValue(store),
+          messageRepositoryProvider.overrideWithValue(repository),
+          attachmentServiceProvider.overrideWithValue(attachments),
+          conversationRepositoryProvider.overrideWithValue(
+            _ConversationRepository(),
+          ),
+        ],
+      );
+      try {
+        await container.read(conversationDetailProvider('chat').future);
+        await container.read(messagesProvider('chat').future);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: const MaterialApp(home: ChatPage(conversationId: 'chat')),
+          ),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('Đính kèm ảnh hoặc tệp'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('attach-file')));
+        await tester.pumpAndSettle();
+        expect(attachments.pickedImages, [false]);
+        expect(find.text('ke-hoach.pdf'), findsOneWidget);
+        expect(find.byKey(const ValueKey('open-voice-panel')), findsNothing);
+        await tester.enterText(find.byType(TextField), 'Bản kế hoạch mới');
+        final failure = Completer<ChatMessage>();
+        repository.nextAttachmentResult = failure.future;
+        await tester.tap(find.byTooltip('Gửi tệp đính kèm'));
+        await tester.pump();
+        failure.completeError(StateError('offline'));
+        await tester.pumpAndSettle();
+        expect(find.text('Chưa gửi · Bấm gửi để thử lại'), findsOneWidget);
+        expect(
+          tester.widget<TextField>(find.byType(TextField)).readOnly,
+          isTrue,
+        );
+        repository.nextAttachmentResult = null;
+        await tester.tap(find.byTooltip('Gửi tệp đính kèm'));
+        await tester.pumpAndSettle();
+        expect(repository.attachmentAttempts, hasLength(2));
+        expect(
+          repository.attachmentAttempts[0],
+          repository.attachmentAttempts[1],
+        );
+        final message = container
+            .read(messagesProvider('chat'))
+            .requireValue
+            .single;
+        expect(message.text, 'Bản kế hoạch mới');
+        expect(message.attachment?.name, 'ke-hoach.pdf');
+        expect(
+          (await store.loadMessages('alice', 'chat')).single.attachment?.size,
+          42,
+        );
+        expect(find.byTooltip('Đính kèm ảnh hoặc tệp'), findsOneWidget);
+        await tester.tap(
+          find.byKey(const ValueKey('attachment-attachment-server')),
+        );
+        await tester.pumpAndSettle();
+        expect(attachments.opened, ['/tmp/ke-hoach.pdf']);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        container.dispose();
+        await store.close();
+      }
+    },
+  );
+  testWidgets(
+    'received image opens a zoom viewer in dark mode on a small phone',
+    (tester) async {
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final directory = Directory.systemTemp.createTempSync(
+        'chat-image-widget-',
+      );
+      final imageFile = File('${directory.path}/photo.png')
+        ..writeAsBytesSync(
+          base64Decode(
+            'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGMQTr32HwAEKwJOk+jLUgAAAABJRU5ErkJggg==',
+          ),
+        );
+      final message = ChatMessage(
+        id: 'image-received',
+        clientMessageId: 'image-client',
+        conversationId: 'chat',
+        senderId: 'bob',
+        text: 'Ảnh mới',
+        sequence: 1,
+        kind: MessageKind.image,
+        createdAt: DateTime.utc(2026, 10, 16),
+        status: MessageStatus.sent,
+        attachment: MessageAttachment(
+          name: 'photo.png',
+          size: imageFile.lengthSync(),
+          contentType: 'image/png',
+        ),
+      );
+      final store = ChatLocalStore(executor: NativeDatabase.memory());
+      final repository = _MessageRepository(messages: [message])
+        ..attachmentPath = imageFile.path;
+      final container = ProviderContainer(
+        overrides: [
+          currentUserProvider.overrideWithValue(_account),
+          realtimeServiceProvider.overrideWithValue(null),
+          chatLocalStoreProvider.overrideWithValue(store),
+          messageRepositoryProvider.overrideWithValue(repository),
+          conversationRepositoryProvider.overrideWithValue(
+            _ConversationRepository(),
+          ),
+        ],
+      );
+      try {
+        await container.read(conversationDetailProvider('chat').future);
+        await container.read(messagesProvider('chat').future);
+        await tester.pumpWidget(
+          UncontrolledProviderScope(
+            container: container,
+            child: MaterialApp(
+              theme: AppTheme.dark,
+              home: Scaffold(
+                body: Center(
+                  child: AttachmentBubble(message: message, isMine: false),
+                ),
+              ),
+            ),
+          ),
+        );
+        await tester.pump();
+        await tester.runAsync(
+          () => precacheImage(
+            FileImage(imageFile),
+            tester.element(find.byType(AttachmentBubble)),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('attachment-image-received')),
+          findsOneWidget,
+        );
+        await tester.tap(
+          find.byKey(const ValueKey('attachment-image-received')),
+        );
+        await tester.pumpAndSettle();
+        expect(find.byType(InteractiveViewer), findsOneWidget);
+        expect(find.byTooltip('Đóng ảnh'), findsOneWidget);
+        await tester.tap(find.byTooltip('Đóng ảnh'));
+        await tester.pumpAndSettle();
+        expect(find.byType(InteractiveViewer), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        container.dispose();
+        await store.close();
+        directory.deleteSync(recursive: true);
+      }
+    },
+  );
+
   testWidgets('dictated text can be edited and sent as a normal chat message', (
     tester,
   ) async {
@@ -280,11 +518,11 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'Chào');
       await tester.tap(find.byKey(const ValueKey('open-voice-panel')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Gửi dạng văn bản'));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Chào');
       await tester.tap(find.byKey(const ValueKey('voice-record-button')));
       await tester.pumpAndSettle();
       expect(find.text('Đang nghe · Tiếng Việt'), findsOneWidget);
@@ -359,11 +597,11 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField), 'Bản nháp');
       await tester.tap(find.byKey(const ValueKey('open-voice-panel')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Gửi dạng văn bản'));
       await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField), 'Bản nháp');
       await tester.tap(find.byKey(const ValueKey('voice-record-button')));
       await tester.pumpAndSettle();
       expect(find.textContaining('quyền micro'), findsOneWidget);

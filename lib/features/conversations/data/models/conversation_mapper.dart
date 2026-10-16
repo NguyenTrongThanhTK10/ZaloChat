@@ -10,6 +10,7 @@ Conversation conversationFromJson(Object? source) {
     id: json['id'] as String,
     title: peer['displayName'] as String,
     peerId: peer['id'] as String,
+    avatarUrl: peer['avatarUrl'] as String?,
     unreadCount: (json['unreadCount'] as num?)?.toInt() ?? 0,
     lastReadSequence: (json['lastReadSequence'] as num?)?.toInt() ?? 0,
     peerLastReadSequence: (json['peerLastReadSequence'] as num?)?.toInt() ?? 0,
@@ -21,6 +22,10 @@ Conversation conversationFromJson(Object? source) {
         ? 'Tin nhắn đã thu hồi'
         : lastMessage?['kind'] == 'voice'
         ? '🎤 Tin nhắn thoại'
+        : lastMessage?['kind'] == 'image'
+        ? '📷 Ảnh'
+        : lastMessage?['kind'] == 'file'
+        ? '📎 ${(lastMessage?['attachment'] as Map?)?['name'] ?? 'Tệp đính kèm'}'
         : lastMessage?['text'] as String?,
     lastMessageAt: lastMessage?['createdAt'] is String
         ? DateTime.parse(lastMessage!['createdAt'] as String).toLocal()

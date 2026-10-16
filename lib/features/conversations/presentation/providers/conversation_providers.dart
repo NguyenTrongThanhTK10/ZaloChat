@@ -108,6 +108,11 @@ class ConversationListNotifier extends AsyncNotifier<List<Conversation>> {
         ?.where((item) => item.id == conversation.id)
         .firstOrNull;
     if (previous != null) {
+      if (previous.title != conversation.title ||
+          previous.avatarUrl != conversation.avatarUrl) {
+        ref.invalidate(userDetailProvider(conversation.peerId));
+        ref.invalidate(userSearchProvider);
+      }
       conversation = _preserveCursors(conversation, previous);
     }
     if (_loadingRemote) _updatesDuringLoad[conversation.id] = conversation;

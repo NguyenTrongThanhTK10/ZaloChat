@@ -113,6 +113,7 @@ class _PeoplePageState extends ConsumerState<PeoplePage> {
                                 ),
                                 icon: ChatAvatar(
                                   name: user.displayName,
+                                  imageUrl: user.avatarUrl,
                                   size: 44,
                                 ),
                               ),

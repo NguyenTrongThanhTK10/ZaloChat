@@ -3,10 +3,12 @@ using System.Security.Claims;
 using Chat.Api.Auth;
 using Chat.Api.Data;
 using Chat.Api.Models;
+using Chat.Api.Hubs;
+using Microsoft.AspNetCore.SignalR;
 
 namespace Chat.Api.Endpoints;
 
-public static class AuthEndpoints
+public static partial class AuthEndpoints
 {
     public static void MapAuthEndpoints(this WebApplication app)
     {
@@ -16,6 +18,9 @@ public static class AuthEndpoints
         auth.MapPost("/refresh", RefreshAsync).RequireRateLimiting("auth");
         auth.MapGet("/me", GetMeAsync).RequireAuthorization();
         auth.MapPut("/me", UpdateMeAsync).RequireAuthorization();
+        auth.MapPut("/me/profile", UpdateProfileWithAvatarAsync).RequireAuthorization()
+            .RequireRateLimiting("send");
+        app.MapGet("/api/users/{id:guid}/avatar/{version:guid}", GetAvatarAsync).RequireAuthorization();
     }
 
     public static Guid CurrentUserId(this ClaimsPrincipal user) =>
@@ -107,6 +112,7 @@ public static class AuthEndpoints
 
     private static async Task<IResult> UpdateMeAsync(
         UpdateProfileRequest request, ClaimsPrincipal principal, ChatStore store,
+        IHubContext<ChatHub> hub, ILogger<ChatHub> logger,
         CancellationToken cancellationToken)
     {
         var displayName = request.DisplayName?.Trim();
@@ -129,6 +135,7 @@ public static class AuthEndpoints
             user.Email = email;
             return UserDto.From(user);
         }, cancellationToken);
+        await PublishProfileUpdatedAsync(updated.Id, store, hub, logger);
         return Results.Ok(updated);
     }
 

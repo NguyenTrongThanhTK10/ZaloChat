@@ -15,7 +15,7 @@ class ChatLocalStore extends GeneratedDatabase {
     : super(executor ?? driftDatabase(name: 'appchatdemo_chat'));
 
   @override
-  int get schemaVersion => 8;
+  int get schemaVersion => 9;
 
   // The schema is created with SQL below, so it needs no generated Drift code.
   @override
@@ -62,6 +62,11 @@ class ChatLocalStore extends GeneratedDatabase {
           'ALTER TABLE messages ADD COLUMN is_recalled INTEGER NOT NULL DEFAULT 0',
         );
       }
+      if (from >= 3 && from < 9) {
+        await m.database.customStatement(
+          'ALTER TABLE messages ADD COLUMN attachment_json TEXT',
+        );
+      }
     },
   );
 
@@ -82,6 +87,7 @@ class ChatLocalStore extends GeneratedDatabase {
         voice_duration_ms INTEGER,
         reply_to_json TEXT,
         is_recalled INTEGER NOT NULL DEFAULT 0,
+        attachment_json TEXT,
         PRIMARY KEY (account_id, conversation_id, sender_id, id),
         UNIQUE (account_id, conversation_id, sender_id, client_message_id)
       )
@@ -327,7 +333,7 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
                sequence, created_at_ms, status, hearted_by_json, kind,
-               voice_duration_ms, reply_to_json, is_recalled
+               voice_duration_ms, reply_to_json, is_recalled, attachment_json
         FROM messages
         WHERE account_id = ? AND conversation_id = ?
           ${olderPage ? 'AND sequence > 0 AND sequence < ?' : ''}
@@ -396,7 +402,7 @@ class ChatLocalStore extends GeneratedDatabase {
         SELECT m.id, m.client_message_id, m.conversation_id, m.sender_id,
                m.body, m.sequence, m.created_at_ms, m.status,
                m.hearted_by_json, m.kind, m.voice_duration_ms, m.reply_to_json,
-               m.is_recalled
+               m.is_recalled, m.attachment_json
         FROM outbox AS o
         JOIN messages AS m
           ON m.account_id = o.account_id
@@ -539,7 +545,7 @@ class ChatLocalStore extends GeneratedDatabase {
       '''
         SELECT id, client_message_id, conversation_id, sender_id, body,
                sequence, created_at_ms, status, hearted_by_json, kind,
-               voice_duration_ms, reply_to_json, is_recalled
+               voice_duration_ms, reply_to_json, is_recalled, attachment_json
         FROM messages
         WHERE account_id = ? AND conversation_id = ? AND sender_id = ?
           AND (id = ? OR client_message_id = ?)
@@ -588,8 +594,8 @@ class ChatLocalStore extends GeneratedDatabase {
         INSERT INTO messages
           (account_id, id, client_message_id, conversation_id, sender_id,
            body, sequence, created_at_ms, status, hearted_by_json, kind,
-           voice_duration_ms, reply_to_json, is_recalled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           voice_duration_ms, reply_to_json, is_recalled, attachment_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ''',
       [
         accountId,
@@ -613,6 +619,9 @@ class ChatLocalStore extends GeneratedDatabase {
         value.voiceDurationMs,
         value.replyTo == null ? null : jsonEncode(value.replyTo!.toJson()),
         value.isRecalled ? 1 : 0,
+        value.attachment == null
+            ? null
+            : jsonEncode(value.attachment!.toJson()),
       ],
     );
 
@@ -678,6 +687,12 @@ class ChatLocalStore extends GeneratedDatabase {
       reactionSets: reactionSets,
       kind: MessageKind.values.byName(row.read<String>('kind')),
       voiceDurationMs: row.read<int?>('voice_duration_ms'),
+      attachment: row.read<String?>('attachment_json') == null
+          ? null
+          : MessageAttachment.fromJson(
+              jsonDecode(row.read<String>('attachment_json'))
+                  as Map<String, dynamic>,
+            ),
       replyTo: row.read<String?>('reply_to_json') == null
           ? null
           : MessageReply.fromJson(

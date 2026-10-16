@@ -18,11 +18,17 @@ import '../../../../core/realtime/realtime_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/chat_avatar.dart';
 import '../../../../core/widgets/content_state.dart';
+import '../../../../core/network/api_exception.dart';
 import '../../../auth/presentation/providers/auth_providers.dart';
 import '../../../conversations/domain/entities/conversation.dart';
 import '../../../conversations/presentation/providers/conversation_providers.dart';
 import '../../domain/entities/chat_message.dart';
 import '../providers/message_providers.dart';
+import '../providers/attachment_providers.dart';
+import '../widgets/attachment_bubble.dart';
+import '../widgets/attachment_picker_sheet.dart';
+import '../widgets/message_actions_sheet.dart';
+import '../widgets/pending_attachment_preview.dart';
 
 class ChatPage extends ConsumerStatefulWidget {
   const ChatPage({super.key, required this.conversationId});
@@ -42,6 +48,10 @@ class _ChatPageState extends ConsumerState<ChatPage>
   final _reactionBusy = <String>{};
   final _recallBusy = <String>{};
   bool _sending = false;
+  bool _pickingAttachment = false;
+  PickedChatAttachment? _pendingAttachment;
+  String? _attachmentError;
+  ({String text, MessageReply? replyTo})? _attachmentUpload;
   bool _showEmojiPicker = false;
   bool _showVoicePanel = false;
   bool _voiceAsText = false;
@@ -82,6 +92,9 @@ class _ChatPageState extends ConsumerState<ChatPage>
       unawaited(_cancelSpeech());
       _lastSpeechError = null;
       _replyTo = null;
+      _pendingAttachment = null;
+      _attachmentError = null;
+      _attachmentUpload = null;
       _showVoicePanel = false;
       _voiceAsText = false;
       unawaited(_discardVoice());
@@ -161,11 +174,153 @@ class _ChatPageState extends ConsumerState<ChatPage>
   }
 
   Future<void> _sendMessage() async {
+    if (_pendingAttachment != null) {
+      await _sendAttachment();
+      return;
+    }
     await _sendText(_composerController.text, clearComposer: true);
   }
 
+  Future<void> _openAttachments() async {
+    if (_sending ||
+        _voiceBusy ||
+        _speechActive ||
+        _recording ||
+        _recordedVoice != null ||
+        _pickingAttachment) {
+      return;
+    }
+    final conversationId = widget.conversationId;
+    _composerFocus.unfocus();
+    setState(() {
+      _pickingAttachment = true;
+      _showVoicePanel = false;
+      _showEmojiPicker = false;
+    });
+    try {
+      final source = await showModalBottomSheet<AttachmentSource>(
+        context: context,
+        showDragHandle: true,
+        useSafeArea: true,
+        isScrollControlled: true,
+        constraints: BoxConstraints(
+          maxWidth: 560,
+          maxHeight: MediaQuery.sizeOf(context).height * 0.8,
+        ),
+        shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        builder: (_) => const AttachmentPickerSheet(),
+      );
+      if (!mounted ||
+          widget.conversationId != conversationId ||
+          source == null) {
+        return;
+      }
+      final picked = await ref
+          .read(attachmentServiceProvider)
+          .pick(image: source == AttachmentSource.image);
+      if (!mounted ||
+          widget.conversationId != conversationId ||
+          picked == null) {
+        return;
+      }
+      setState(() {
+        _pendingAttachment = picked;
+        _attachmentError = null;
+        _attachmentUpload = null;
+      });
+    } catch (error) {
+      if (mounted && widget.conversationId == conversationId) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              error is ApiException
+                  ? error.message
+                  : 'Chưa chọn được tệp. Vui lòng thử lại.',
+            ),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _pickingAttachment = false);
+    }
+  }
+
+  Future<void> _sendAttachment() async {
+    final attachment = _pendingAttachment;
+    if (attachment == null ||
+        _sending ||
+        _pickingAttachment ||
+        _speechActive ||
+        _voiceBusy) {
+      return;
+    }
+    final text = _composerController.text.trim();
+    if (text.length > 4000) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Chú thích tối đa 4.000 ký tự.')),
+      );
+      return;
+    }
+    final conversationId = widget.conversationId;
+    final draft = _attachmentUpload ?? (text: text, replyTo: _replyTo);
+    setState(() {
+      _sending = true;
+      _attachmentError = null;
+      _attachmentUpload = draft;
+    });
+    try {
+      await ref
+          .read(messagesProvider(conversationId).notifier)
+          .sendAttachment(
+            attachment.path,
+            attachment.metadata.name,
+            attachment.kind,
+            clientMessageId: attachment.clientMessageId,
+            text: draft.text,
+            replyTo: draft.replyTo,
+          );
+      if (!mounted || widget.conversationId != conversationId) return;
+      setState(() {
+        _pendingAttachment = null;
+        _attachmentUpload = null;
+        if (_composerController.text.trim() == draft.text) {
+          _composerController.clear();
+        }
+        if (_replyTo?.id == draft.replyTo?.id) _replyTo = null;
+      });
+      if (_scrollController.hasClients) {
+        unawaited(
+          _scrollController.animateTo(
+            0,
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+          ),
+        );
+      }
+    } catch (error) {
+      if (mounted && widget.conversationId == conversationId) {
+        setState(
+          () => _attachmentError = error is ApiException
+              ? error.message
+              : 'Chưa gửi được tệp. Vui lòng thử lại.',
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sending = false);
+    }
+  }
+
   void _openVoicePanel() {
-    if (_sending || _voiceBusy || _speechActive) return;
+    if (_sending ||
+        _voiceBusy ||
+        _speechActive ||
+        _pendingAttachment != null ||
+        _pickingAttachment) {
+      return;
+    }
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _showEmojiPicker = false;
@@ -467,6 +622,7 @@ class _ChatPageState extends ConsumerState<ChatPage>
         message.sequence > 0 &&
         !message.isRecalled &&
         !_sending &&
+        _attachmentUpload == null &&
         !_voiceBusy &&
         !_recording &&
         !_speechActive &&
@@ -479,78 +635,40 @@ class _ChatPageState extends ConsumerState<ChatPage>
     final selectedReactions = message.effectiveReactionSets[userId] ?? const [];
     final action = await showModalBottomSheet<Object>(
       context: context,
-      showDragHandle: true,
-      builder: (sheetContext) => SafeArea(
-        top: false,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (!message.isRecalled)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: AppSpacing.sm),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    for (final reaction in MessageReaction.values)
-                      Tooltip(
-                        message: selectedReactions.contains(reaction)
-                            ? 'Gỡ ${reaction == MessageReaction.heart ? 'tim' : _reactionLabel(reaction).toLowerCase()}'
-                            : _reactionLabel(reaction),
-                        child: IconButton(
-                          key: ValueKey('reaction-${reaction.name}'),
-                          onPressed: canReact
-                              ? () => Navigator.pop(sheetContext, reaction)
-                              : null,
-                          style: IconButton.styleFrom(
-                            backgroundColor:
-                                selectedReactions.contains(reaction)
-                                ? Theme.of(sheetContext)
-                                      .colorScheme
-                                      .primaryContainer
-                                : null,
-                          ),
-                          icon: _reactionIcon(reaction, size: 26),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ListTile(
-              leading: const Icon(Icons.copy_rounded),
-              title: const Text('Sao chép'),
-              enabled: message.kind == MessageKind.text && !message.isRecalled,
-              onTap: () => Navigator.pop(sheetContext, _MessageAction.copy),
-            ),
-            ListTile(
-              leading: const Icon(Icons.reply_rounded),
-              title: const Text('Trả lời'),
-              enabled: canReply,
-              onTap: () => Navigator.pop(sheetContext, _MessageAction.reply),
-            ),
-            if (canRecall)
-              ListTile(
-                key: const ValueKey('recall-message-action'),
-                leading: const Icon(Icons.undo_rounded),
-                title: const Text('Thu hồi tin nhắn'),
-                onTap: () => Navigator.pop(sheetContext, _MessageAction.recall),
-              ),
-            const SizedBox(height: AppSpacing.sm),
-          ],
-        ),
+      isScrollControlled: true,
+      useSafeArea: true,
+      showDragHandle: false,
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      barrierColor: Colors.black.withValues(alpha: 0.4),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      constraints: BoxConstraints(
+        maxWidth: 560,
+        maxHeight: MediaQuery.sizeOf(context).height * 0.88,
+      ),
+      builder: (_) => MessageActionsSheet(
+        message: message,
+        selectedReactions: selectedReactions,
+        isMine: userId == message.senderId,
+        canReact: canReact,
+        canReply: canReply,
+        canRecall: canRecall,
       ),
     );
     if (!mounted || widget.conversationId != conversationId) return;
     switch (action) {
       case MessageReaction reaction:
         if (canReact) await _setReaction(message, userId, reaction);
-      case _MessageAction.copy:
+      case MessageAction.copy:
         await Clipboard.setData(ClipboardData(text: message.text));
         if (mounted) {
           ScaffoldMessenger.of(
             context,
           ).showSnackBar(const SnackBar(content: Text('Đã sao chép tin nhắn')));
         }
-      case _MessageAction.reply:
+      case MessageAction.reply:
         if (canReply) {
           setState(() {
             _replyTo = MessageReply.fromMessage(message);
@@ -558,7 +676,7 @@ class _ChatPageState extends ConsumerState<ChatPage>
           });
           _composerFocus.requestFocus();
         }
-      case _MessageAction.recall:
+      case MessageAction.recall:
         if (canRecall) await _recallMessage(message);
       case null:
         break;
@@ -1047,7 +1165,8 @@ class _ChatPageState extends ConsumerState<ChatPage>
                       !_recording &&
                           _recordedVoice == null &&
                           !_voiceBusy &&
-                          !_sending
+                          !_sending &&
+                          _attachmentUpload == null
                       ? () => setState(() => _replyTo = null)
                       : null,
                   composer: true,
@@ -1055,6 +1174,19 @@ class _ChatPageState extends ConsumerState<ChatPage>
               ),
             if (_showVoicePanel) _voicePanel(context),
             if (_showEmojiPicker) _emojiPicker(context),
+            if (_pendingAttachment case final attachment?)
+              PendingAttachmentPreview(
+                attachment: attachment,
+                error: _attachmentError,
+                retry: _attachmentUpload != null && !_sending,
+                onRemove: _sending
+                    ? null
+                    : () => setState(() {
+                        _pendingAttachment = null;
+                        _attachmentError = null;
+                        _attachmentUpload = null;
+                      }),
+              ),
             Padding(
               padding: const EdgeInsets.fromLTRB(8, 8, 8, 8),
               child: Row(
@@ -1065,7 +1197,11 @@ class _ChatPageState extends ConsumerState<ChatPage>
                         ? 'Đóng biểu tượng cảm xúc'
                         : 'Chọn biểu tượng cảm xúc',
                     onPressed:
-                        _speechActive || _recording || _recordedVoice != null
+                        _speechActive ||
+                            _recording ||
+                            _recordedVoice != null ||
+                            _attachmentUpload != null ||
+                            _pickingAttachment
                         ? null
                         : () {
                             FocusManager.instance.primaryFocus?.unfocus();
@@ -1084,7 +1220,10 @@ class _ChatPageState extends ConsumerState<ChatPage>
                   Expanded(
                     child: TextField(
                       readOnly:
-                          _speechActive || _recording || _recordedVoice != null,
+                          _speechActive ||
+                          _recording ||
+                          _recordedVoice != null ||
+                          _attachmentUpload != null,
                       focusNode: _composerFocus,
                       controller: _composerController,
                       onTap: () {
@@ -1103,47 +1242,65 @@ class _ChatPageState extends ConsumerState<ChatPage>
                       maxLines: 5,
                       keyboardType: TextInputType.multiline,
                       textCapitalization: TextCapitalization.sentences,
-                      decoration: const InputDecoration(
-                        hintText: 'Tin nhắn',
+                      decoration: InputDecoration(
+                        hintText: _pendingAttachment == null
+                            ? 'Tin nhắn'
+                            : 'Thêm chú thích...',
                         isDense: true,
                       ),
                     ),
                   ),
-                  IconButton(
-                    key: const ValueKey('open-voice-panel'),
-                    tooltip: _showVoicePanel ? 'Đóng ghi âm' : 'Mở ghi âm',
-                    onPressed:
-                        _sending ||
-                            _voiceBusy ||
-                            _speechActive ||
-                            _recording ||
-                            _recordedVoice != null
-                        ? null
-                        : _showVoicePanel
-                        ? _closeVoicePanel
-                        : _openVoicePanel,
-                    icon: Icon(
-                      _showVoicePanel
-                          ? Icons.keyboard_voice_rounded
-                          : Icons.mic_none_rounded,
-                      color: scheme.primary,
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: _composerController,
+                    builder: (context, value, child) =>
+                        value.text.trim().isEmpty && _pendingAttachment == null
+                        ? child!
+                        : const SizedBox.shrink(),
+                    child: IconButton(
+                      key: const ValueKey('open-voice-panel'),
+                      tooltip: _showVoicePanel ? 'Đóng ghi âm' : 'Mở ghi âm',
+                      onPressed:
+                          _sending ||
+                              _pickingAttachment ||
+                              _voiceBusy ||
+                              _speechActive ||
+                              _recording ||
+                              _recordedVoice != null
+                          ? null
+                          : _showVoicePanel
+                          ? _closeVoicePanel
+                          : _openVoicePanel,
+                      icon: Icon(
+                        _showVoicePanel
+                            ? Icons.keyboard_voice_rounded
+                            : Icons.mic_none_rounded,
+                        color: scheme.primary,
+                      ),
                     ),
                   ),
                   ValueListenableBuilder<TextEditingValue>(
                     valueListenable: _composerController,
                     builder: (context, value, _) {
-                      final canSend = value.text.trim().isNotEmpty && !_sending;
+                      final canSend =
+                          value.text.trim().isNotEmpty ||
+                          _pendingAttachment != null;
                       return IconButton.filled(
-                        tooltip: canSend ? 'Gửi tin nhắn' : 'Gửi tim',
+                        tooltip: _pendingAttachment != null
+                            ? 'Gửi tệp đính kèm'
+                            : canSend
+                            ? 'Gửi tin nhắn'
+                            : 'Đính kèm ảnh hoặc tệp',
                         onPressed:
                             _sending ||
+                                _pickingAttachment ||
+                                _voiceBusy ||
                                 _speechActive ||
                                 _recording ||
                                 _recordedVoice != null
                             ? null
                             : canSend
                             ? _sendMessage
-                            : () => _sendText('❤️'),
+                            : _openAttachments,
                         icon: _sending
                             ? const SizedBox(
                                 width: 20,
@@ -1155,7 +1312,7 @@ class _ChatPageState extends ConsumerState<ChatPage>
                             : Icon(
                                 canSend
                                     ? Icons.send_rounded
-                                    : Icons.favorite_rounded,
+                                    : Icons.attach_file_rounded,
                               ),
                       );
                     },
@@ -1523,29 +1680,6 @@ class _DayDivider extends StatelessWidget {
   }
 }
 
-enum _MessageAction { copy, reply, recall }
-
-String _reactionLabel(MessageReaction reaction) => switch (reaction) {
-  MessageReaction.heart => 'Thả tim',
-  MessageReaction.like => 'Thích',
-  MessageReaction.laugh => 'Cười',
-  MessageReaction.wow => 'Ngạc nhiên',
-  MessageReaction.sad => 'Khóc',
-  MessageReaction.angry => 'Tức giận',
-};
-
-Widget _reactionIcon(MessageReaction reaction, {double size = 18}) =>
-    reaction == MessageReaction.heart
-    ? Icon(Icons.favorite_rounded, size: size, color: const Color(0xFFE53935))
-    : Text(switch (reaction) {
-        MessageReaction.heart => '❤️',
-        MessageReaction.like => '👍',
-        MessageReaction.laugh => '😆',
-        MessageReaction.wow => '😮',
-        MessageReaction.sad => '😢',
-        MessageReaction.angry => '😡',
-      }, style: TextStyle(fontSize: size));
-
 class _ReplyPreview extends StatelessWidget {
   const _ReplyPreview({
     required this.reply,
@@ -1744,9 +1878,7 @@ class _MessageBubble extends ConsumerWidget {
                               ),
                               decoration: BoxDecoration(
                                 color: isMine
-                                    ? theme.brightness == Brightness.dark
-                                          ? const Color(0xFFDDEBFF)
-                                          : scheme.primaryContainer
+                                    ? scheme.primaryContainer
                                     : scheme.surface,
                                 borderRadius: BorderRadius.only(
                                   topLeft: const Radius.circular(20),
@@ -1777,7 +1909,10 @@ class _MessageBubble extends ConsumerWidget {
                                       style: theme.textTheme.bodyMedium
                                           ?.copyWith(
                                             fontStyle: FontStyle.italic,
-                                            color: scheme.onSurfaceVariant,
+                                            color: isMine
+                                                ? scheme.onPrimaryContainer
+                                                      .withValues(alpha: 0.75)
+                                                : scheme.onSurfaceVariant,
                                           ),
                                     )
                                   else if (message.kind == MessageKind.voice)
@@ -1785,6 +1920,12 @@ class _MessageBubble extends ConsumerWidget {
                                       message: message,
                                       playback: playback,
                                       onPlay: onPlayVoice,
+                                      isMine: isMine,
+                                    )
+                                  else if (message.kind == MessageKind.image ||
+                                      message.kind == MessageKind.file)
+                                    AttachmentBubble(
+                                      message: message,
                                       isMine: isMine,
                                     )
                                   else
@@ -1800,7 +1941,7 @@ class _MessageBubble extends ConsumerWidget {
                                               MessageTextSize.large => 18,
                                             },
                                             color: isMine
-                                                ? Colors.black
+                                                ? scheme.onPrimaryContainer
                                                 : scheme.onSurface,
                                             height: 1.4,
                                           ),
@@ -1836,7 +1977,7 @@ class _MessageBubble extends ConsumerWidget {
                                             in visibleReactions.indexed) ...[
                                           if (index > 0)
                                             const SizedBox(width: 3),
-                                          _reactionIcon(reaction),
+                                          MessageReactionIcon(reaction),
                                         ],
                                         if (reactionTotal > 1) ...[
                                           const SizedBox(width: 4),
@@ -1912,7 +2053,7 @@ class _VoiceBubble extends StatelessWidget {
     final durationMs = message.voiceDurationMs ?? 0;
     final totalSeconds = (durationMs / 1000).ceil();
     final scheme = Theme.of(context).colorScheme;
-    final foreground = isMine ? Colors.black : scheme.primary;
+    final foreground = isMine ? scheme.onPrimaryContainer : scheme.primary;
     return ListenableBuilder(
       listenable: playback ?? const _SilentListenable(),
       builder: (context, _) {

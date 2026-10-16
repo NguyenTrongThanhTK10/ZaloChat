@@ -1,6 +1,43 @@
 enum MessageStatus { sending, sent, delivered, read, failed }
 
-enum MessageKind { text, voice }
+enum MessageKind { text, voice, image, file }
+
+MessageKind messageKindFromName(Object? name) => MessageKind.values.firstWhere(
+  (kind) => kind.name == name,
+  orElse: () => MessageKind.text,
+);
+
+class MessageAttachment {
+  const MessageAttachment({
+    required this.name,
+    required this.size,
+    required this.contentType,
+  });
+
+  factory MessageAttachment.fromJson(Map<String, dynamic> json) =>
+      MessageAttachment(
+        name: json['name'] as String,
+        size: (json['size'] as num).toInt(),
+        contentType: json['contentType'] as String,
+      );
+
+  static const maxBytes = 20_000_000;
+  final String name;
+  final int size;
+  final String contentType;
+
+  Map<String, dynamic> toJson() => {
+    'name': name,
+    'size': size,
+    'contentType': contentType,
+  };
+
+  String get formattedSize => size >= 1_000_000
+      ? '${(size / 1_000_000).toStringAsFixed(1)} MB'
+      : size >= 1000
+      ? '${(size / 1000).toStringAsFixed(1)} KB'
+      : '$size B';
+}
 
 enum MessageReaction { heart, like, laugh, wow, sad, angry }
 
@@ -15,7 +52,11 @@ class MessageReply {
   factory MessageReply.fromMessage(ChatMessage message) => MessageReply(
     id: message.id,
     senderId: message.senderId,
-    text: message.text,
+    text: switch (message.kind) {
+      MessageKind.image => 'Ảnh',
+      MessageKind.file => message.attachment?.name ?? 'Tệp đính kèm',
+      _ => message.text,
+    },
     kind: message.kind,
   );
 
@@ -23,7 +64,7 @@ class MessageReply {
     id: json['id'] as String,
     senderId: json['senderId'] as String,
     text: json['text'] as String,
-    kind: json['kind'] == 'voice' ? MessageKind.voice : MessageKind.text,
+    kind: messageKindFromName(json['kind']),
   );
 
   final String id;
@@ -51,6 +92,7 @@ class ChatMessage {
     required this.status,
     this.kind = MessageKind.text,
     this.voiceDurationMs,
+    this.attachment,
     this.heartedBy = const [],
     this.reactions = const {},
     this.reactionSets = const {},
@@ -68,6 +110,7 @@ class ChatMessage {
   final MessageStatus status;
   final MessageKind kind;
   final int? voiceDurationMs;
+  final MessageAttachment? attachment;
   final List<String> heartedBy;
   final Map<String, MessageReaction> reactions;
   final Map<String, List<MessageReaction>> reactionSets;
@@ -115,6 +158,7 @@ class ChatMessage {
       status: status ?? this.status,
       kind: kind,
       voiceDurationMs: voiceDurationMs,
+      attachment: attachment,
       heartedBy: heartedBy ?? this.heartedBy,
       reactions: reactions ?? this.reactions,
       reactionSets: reactionSets ?? this.reactionSets,

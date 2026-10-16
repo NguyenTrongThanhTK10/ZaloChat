@@ -51,7 +51,9 @@ final appRouterProvider = Provider<GoRouter>((ref) {
       ),
       GoRoute(
         path: '/profile/edit',
-        builder: (_, _) => const EditProfilePage(),
+        builder: (_, state) => EditProfilePage(
+          selectPhotoOnOpen: state.uri.queryParameters['photo'] == 'true',
+        ),
       ),
       GoRoute(
         path: '/chat/:id',
